@@ -1,0 +1,116 @@
+{% extends "base.html" %}
+{% block title %}HomeSOC — Overview{% endblock %}
+
+{% block body %}
+<div id="dash-banner-host"></div>
+
+<div id="view-minimal" class="dashboard-minimal">
+  <div class="card-row cols-4">
+    <div class="metric accent">
+      <div class="label">Alerts Today</div>
+      <div class="value" id="m-alerts-today">—</div>
+      <div class="sub" id="m-alerts-today-sub"></div>
+    </div>
+    <div class="metric ok">
+      <div class="label">DNS Block Rate</div>
+      <div class="value"><span id="m-block-rate">—</span><span class="small muted">%</span></div>
+      <div class="sub" id="m-block-rate-sub"></div>
+    </div>
+    <div class="metric">
+      <div class="label">Active Agents</div>
+      <div class="value" id="m-agents">—</div>
+      <div class="sub muted">Wazuh</div>
+    </div>
+    <div class="metric danger">
+      <div class="label">Open P1 Actions</div>
+      <div class="value" id="m-p1">—</div>
+      <div class="sub"><a href="/actions">View kanban →</a></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Quick OSINT Investigation</h3>
+    <form class="osint-bar" onsubmit="SOC.quickOsint(event)">
+      <input type="text" id="quick-osint-ioc" placeholder="IP, domain, URL, or hash">
+      <button type="submit">Investigate</button>
+    </form>
+  </div>
+
+  <div class="card-row cols-2">
+    <div class="card">
+      <h2>Today's Executive Summary <span class="muted small" id="summary-date"></span></h2>
+      <div class="markdown" id="exec-summary"></div>
+    </div>
+    <div class="card">
+      <h2>Recommended Actions</h2>
+      <div id="rec-actions"></div>
+      <a href="/actions" class="small">Open full kanban →</a>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Recent High-Severity Alerts</h2>
+    <div class="alert-feed" id="hi-sev-feed"><div class="muted small">Loading…</div></div>
+  </div>
+</div>
+
+<div id="view-soc" class="dashboard-soc hidden">
+  <div id="soc-p1-banner"></div>
+
+  <div class="soc-grid">
+    <div class="full card">
+      <h2>Live Alert Feed <span class="muted small" id="soc-feed-stale"></span></h2>
+      <div class="alert-feed" id="soc-feed" style="max-height: 360px"></div>
+    </div>
+
+    <div class="card">
+      <h2>Agent Status</h2>
+      <div id="soc-agents" class="scrollable"></div>
+    </div>
+
+    <div class="card">
+      <h2>DNS Statistics</h2>
+      <div id="soc-dns" class="flex-col">
+        <div class="card-row cols-3" style="margin-bottom:6px">
+          <div class="metric"><div class="label">Queries</div><div class="value mono" id="soc-dns-q">—</div></div>
+          <div class="metric"><div class="label">Blocked</div><div class="value mono" id="soc-dns-b">—</div></div>
+          <div class="metric"><div class="label">Block %</div><div class="value mono" id="soc-dns-r">—</div></div>
+        </div>
+        <h3>Top Blocked</h3>
+        <table class="data"><tbody id="soc-dns-top"></tbody></table>
+      </div>
+    </div>
+
+    <div class="card full">
+      <h2>Alert Volume — Last 7 Days</h2>
+      <div class="chart-wrap"><canvas id="chart-vol"></canvas></div>
+    </div>
+
+    <div class="card">
+      <h2>Severity Distribution</h2>
+      <div class="chart-wrap"><canvas id="chart-sev"></canvas></div>
+    </div>
+
+    <div class="card">
+      <h2>Top 10 Alert Types</h2>
+      <div class="chart-wrap"><canvas id="chart-rules"></canvas></div>
+    </div>
+
+    <div class="card">
+      <h2>DNS Query Volume — 7 Days</h2>
+      <div class="chart-wrap"><canvas id="chart-dns-vol"></canvas></div>
+    </div>
+
+    <div class="card">
+      <h2>DNS Block Rate — 7 Days</h2>
+      <div class="chart-wrap"><canvas id="chart-dns-rate"></canvas></div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  SOC.initDashboard();
+</script>
+{% endblock %}

@@ -1,0 +1,37 @@
+[Unit]
+Description=HomeSOC
+After=network.target
+
+[Service]
+User=wazuh
+WorkingDirectory=/opt/dashboard
+Environment=PYTHONUNBUFFERED=1
+Environment=SOC_POLLERS=systemd
+
+# Optional: prepopulate host config via env vars. Users configure these
+# via the GUI (Settings → Hosts) after first login — the values below
+# are used as defaults only if the GUI has nothing set yet.
+#
+# Uncomment + edit the lines below for unattended/IaC provisioning:
+#
+# Environment=SOC_WAZUH_HOST=10.0.0.X
+# Environment=SOC_WAZUH_USER=wazuh
+# Environment=SOC_CLAUDEDEV_HOST=10.0.0.X
+# Environment=SOC_CLAUDEDEV_USER=dev
+# Environment=SOC_ADGUARD_HOST=10.0.0.X
+# Environment=SOC_ADGUARD_USER=root
+# Environment=SOC_ADGUARD_QUERYLOG=/opt/AdGuardHome/data/querylog.json
+# Environment=SOC_SSH_KEY=/opt/dashboard/.ssh/id_ed25519
+# Environment=SOC_CLAUDE_CLI=/usr/local/bin/claude
+# Environment=SOC_SIEM_SCRIPTS_DIR=/opt/siem/scripts
+
+EnvironmentFile=-/opt/dashboard/.env
+
+ExecStart=/opt/dashboard/venv/bin/python app.py
+Restart=always
+RestartSec=10
+StandardOutput=append:/var/log/soc-dashboard.log
+StandardError=append:/var/log/soc-dashboard.log
+
+[Install]
+WantedBy=multi-user.target

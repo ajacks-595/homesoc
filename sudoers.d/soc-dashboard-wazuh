@@ -1,0 +1,33 @@
+# /etc/sudoers.d/soc-dashboard-wazuh — install on wazuh-vm (10.0.0.213)
+# Grants the `wazuh` system user NOPASSWD access to the specific commands
+# the SOC dashboard needs.
+#
+# Install with:
+#   sudo visudo -cf this-file       # validate first
+#   sudo install -m 0440 this-file /etc/sudoers.d/soc-dashboard-wazuh
+
+# Read alerts.json (live feed + sync)
+wazuh ALL=(ALL) NOPASSWD: /usr/bin/tail -f /var/ossec/logs/alerts/alerts.json
+wazuh ALL=(ALL) NOPASSWD: /usr/bin/cat /var/ossec/logs/alerts/alerts.json
+
+# Read local_rules.xml (FP manager — load existing suppressions)
+wazuh ALL=(ALL) NOPASSWD: /usr/bin/cat /var/ossec/etc/rules/local_rules.xml
+
+# Write local_rules.xml via tee — dashboard pipes new XML into stdin
+wazuh ALL=(ALL) NOPASSWD: /usr/bin/tee /var/ossec/etc/rules/local_rules.xml
+
+# Validate rule changes before restart.  Newer Wazuh uses `wazuh-analysisd -t`
+# instead of the old `wazuh-verifyconf` binary.
+wazuh ALL=(ALL) NOPASSWD: /var/ossec/bin/wazuh-analysisd -t
+
+# Live agent status panel (Hosts page) and manager version (Settings page)
+wazuh ALL=(ALL) NOPASSWD: /var/ossec/bin/agent_control -l
+wazuh ALL=(ALL) NOPASSWD: /var/ossec/bin/wazuh-control info
+
+# Apply suppression changes
+wazuh ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart wazuh-manager
+
+# Let the dashboard restart itself (so code updates can be deployed unattended).
+# Lower-risk than the wazuh-manager line above — only restarts the app, not
+# the SIEM. Optional; remove if you'd rather drive restarts manually.
+wazuh ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart soc-dashboard.service

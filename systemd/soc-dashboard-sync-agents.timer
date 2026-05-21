@@ -1,0 +1,11 @@
+[Unit]
+Description=SOC Dashboard agent status timer (every 15 min)
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=15min
+Unit=soc-dashboard-sync@agents.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target

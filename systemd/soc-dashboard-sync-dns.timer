@@ -1,0 +1,11 @@
+[Unit]
+Description=SOC Dashboard DNS sync timer (hourly)
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1h
+Unit=soc-dashboard-sync@dns.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target

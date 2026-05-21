@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HomeSOC — Login</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/themes.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}">
+</head>
+<body class="theme-{{ theme }}">
+  <main style="max-width:380px; margin:8vh auto;">
+    <div class="card">
+      <h1 style="display:flex; align-items:center; gap:10px">
+        <span style="display:inline-block; width:10px; height:10px; border-radius:50%; background:var(--accent-secondary); box-shadow:0 0 6px var(--accent-secondary)"></span>
+        HomeSOC
+      </h1>
+      <p class="muted small">Sign in to continue.</p>
+      {% if error %}<div class="banner danger">{{ error }}</div>{% endif %}
+      <form method="POST" action="/login" class="flex-col" style="gap:12px">
+        <input type="hidden" name="next" value="{{ next }}">
+        <div><label>Username</label>
+          <input type="text" name="username" required autofocus style="width:100%"></div>
+        <div><label>Password</label>
+          <input type="password" name="password" required style="width:100%"></div>
+        <button type="submit" style="width:100%">Sign in</button>
+      </form>
+    </div>
+  </main>
+</body>
+</html>

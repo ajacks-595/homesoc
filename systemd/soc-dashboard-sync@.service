@@ -1,0 +1,12 @@
+[Unit]
+Description=HomeSOC sync (%i)
+After=network.target soc-dashboard.service
+Requires=soc-dashboard.service
+
+[Service]
+Type=oneshot
+User=wazuh
+WorkingDirectory=/opt/dashboard
+ExecStart=/opt/dashboard/venv/bin/python /opt/dashboard/app.py --run %i
+StandardOutput=append:/var/log/soc-dashboard.log
+StandardError=append:/var/log/soc-dashboard.log

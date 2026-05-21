@@ -1,0 +1,12 @@
+# /etc/sudoers.d/soc-dashboard-claudedev — install on claude-dev (10.0.0.155)
+# Lets the deployed dashboard (SSHing in from wazuh-vm as user `dev`)
+# trigger SIEM pipeline scripts via "Run Collection Now" / "Run Analysis Now".
+#
+# Install with:
+#   sudo install -m 0440 this-file /etc/sudoers.d/soc-dashboard-claudedev
+
+# Run scripts as the `dev` user, not root — they need access to dev's
+# home (~/.config/anthropic/ for Claude CLI auth, ~/.ssh/collector_key, etc).
+dev ALL=(dev) NOPASSWD: /opt/siem/scripts/collect.sh
+dev ALL=(dev) NOPASSWD: /opt/siem/scripts/analyse.sh
+dev ALL=(dev) NOPASSWD: /opt/siem/scripts/weekly.sh

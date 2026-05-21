@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}Host Inventory{% endblock %}
+{% block view_toggle %}{% endblock %}
+{% block body %}
+
+<div class="flex-row" style="justify-content:space-between; margin-bottom:14px">
+  <h1>Host Inventory</h1>
+  <div class="flex-row">
+    <button class="secondary" onclick="SOC.hostsRefresh()">↻ Refresh agent status</button>
+    <button onclick="SOC.hostsOpenAdd()">+ Add Host</button>
+  </div>
+</div>
+
+<div class="card" style="padding:0">
+  <table class="data" id="hosts-table">
+    <thead><tr>
+      <th>IP</th>
+      <th>Hostname</th>
+      <th>Role</th>
+      <th>Agent</th>
+      <th>Status</th>
+      <th>Last Seen</th>
+      <th>7d Alerts</th>
+      <th>Notes</th>
+      <th></th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>SOC.initHosts();</script>
+{% endblock %}

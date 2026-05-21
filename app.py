@@ -1,0 +1,1368 @@
+"""Flask application — routes, blueprints, JSON API."""
+from __future__ import annotations
+
+import csv
+import io
+import json
+import logging
+import os
+import re
+from datetime import datetime, timedelta
+from pathlib import Path
+
+import markdown as md_lib
+from flask import (
+    Blueprint, Flask, abort, jsonify, render_template, request, send_file,
+)
+
+import ai
+import auth
+import backup
+import config
+import database as db
+import notifications
+import osint
+import parsers
+import sync
+import wazuh
+
+
+# ---------- logging --------------------------------------------------------
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    handlers=[
+        logging.FileHandler(config.LOG_PATH),
+        logging.StreamHandler(),
+    ],
+)
+log = logging.getLogger("soc.app")
+
+
+# ---------- helpers --------------------------------------------------------
+
+def ok(data=None, **extra):
+    return jsonify({"success": True, "data": data, "error": None, **extra})
+
+
+def err(message: str, code: int = 400, **extra):
+    return jsonify({"success": False, "data": None, "error": message, **extra}), code
+
+
+def row_to_dict(row) -> dict:
+    if row is None:
+        return {}
+    d = dict(row)
+    # decode JSON-stored columns
+    for k in ("rule_groups", "raw_json"):
+        if k in d and isinstance(d[k], str) and d[k]:
+            try:
+                d[k] = json.loads(d[k])
+            except json.JSONDecodeError:
+                pass
+    return d
+
+
+def render_md(text: str) -> str:
+    return md_lib.markdown(
+        text,
+        extensions=["fenced_code", "tables", "sane_lists", "nl2br"],
+        output_format="html5",
+    )
+
+
+# ---------- pages blueprint -----------------------------------------------
+
+pages_bp = Blueprint("pages", __name__)
+
+
+@pages_bp.route("/")
+def dashboard_page():
+    return render_template("dashboard.html", theme=config.DEFAULT_THEME)
+
+
+@pages_bp.route("/briefings")
+def briefings_page():
+    return render_template("briefings.html", theme=config.DEFAULT_THEME)
+
+
+@pages_bp.route("/alerts")
+def alerts_page():
+    return render_template("alerts.html", theme=config.DEFAULT_THEME)
+
+
+@pages_bp.route("/osint")
+def osint_page():
+    ioc = request.args.get("ioc", "")
+    return render_template("osint.html", theme=config.DEFAULT_THEME, ioc=ioc)
+
+
+@pages_bp.route("/fp-manager")
+def fp_page():
+    return render_template("fp_manager.html", theme=config.DEFAULT_THEME)
+
+
+@pages_bp.route("/actions")
+def actions_page():
+    return render_template("actions.html", theme=config.DEFAULT_THEME)
+
+
+@pages_bp.route("/hosts")
+def hosts_page():
+    return render_template("hosts.html", theme=config.DEFAULT_THEME)
+
+
+@pages_bp.route("/threat-intel")
+def ti_page():
+    tab = request.args.get("tab", "dns")
+    return render_template("threat_intel.html", theme=config.DEFAULT_THEME, tab=tab)
+
+
+@pages_bp.route("/settings")
+def settings_page():
+    return render_template("settings.html", theme=config.DEFAULT_THEME,
+                           themes=config.THEMES)
+
+
+# ---------- dashboard API -------------------------------------------------
+
+api_bp = Blueprint("api", __name__, url_prefix="/api")
+
+
+@api_bp.route("/dashboard/metrics")
+def metrics():
+    alerts_today = db.alerts_today_count()
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    dns = db.dns_get_daily(today) or {"total_queries": 0, "blocked_queries": 0}
+    block_rate = (
+        round(100.0 * dns["blocked_queries"] / dns["total_queries"], 1)
+        if dns["total_queries"] else 0.0
+    )
+    open_p1 = len(db.list_actions(status="open", priority="P1"))
+    open_p1 += len(db.list_actions(status="in_progress", priority="P1"))
+    active_agents = sum(1 for h in db.list_hosts() if h["agent_status"] == "active")
+
+    # Level-10+ open alerts in last 24h — surfaced as a banner on the dashboard.
+    # Any alert that's been triaged (in_progress / resolved / fp / acked) is
+    # off the queue and shouldn't re-appear here.
+    cutoff = (datetime.utcnow() - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%S")
+    with db.conn() as c:
+        crit_rows = c.execute(
+            """SELECT id, timestamp, agent_name, rule_id, rule_level, rule_description
+               FROM alerts
+               WHERE rule_level >= 10 AND timestamp >= ? AND status = 'open'
+               ORDER BY timestamp DESC LIMIT 10""",
+            (cutoff,),
+        ).fetchall()
+    critical = [dict(r) for r in crit_rows]
+
+    return ok({
+        "alerts_today":  alerts_today,
+        "block_rate":    block_rate,
+        "active_agents": active_agents,
+        "open_p1":       open_p1,
+        "dns_total":     dns["total_queries"],
+        "dns_blocked":   dns["blocked_queries"],
+        "critical_24h":  critical,
+        "critical_count": len(critical),
+    })
+
+
+@api_bp.route("/dashboard/summary")
+def todays_summary():
+    """Executive summary section pulled from today's briefing (or latest)."""
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    row = db.get_briefing_by_date(today, "daily") or db.latest_briefing("daily")
+    if not row:
+        return ok({"html": "<p><em>No briefing available yet.</em></p>",
+                   "date": None})
+    content = row["content"]
+    # Extract "## Executive Summary" through next ## or end
+    m = re.search(r"^##\s*Executive Summary.*?(?=^##\s|\Z)",
+                  content, re.MULTILINE | re.DOTALL)
+    section = m.group(0) if m else content[:2000]
+    return ok({"html": render_md(section), "date": row["date"]})
+
+
+@api_bp.route("/dashboard/stats")
+def dashboard_stats():
+    s = db.alert_stats_7d()
+    dns_trend = db.dns_last_n_days(7)
+    return ok({
+        "alerts_by_day":     s["by_day"],
+        "alerts_by_severity": s["by_severity"],
+        "alerts_top_rules":  s["top_rules"],
+        "dns_trend":         dns_trend,
+    })
+
+
+# ---------- alerts API ----------------------------------------------------
+
+@api_bp.route("/alerts")
+def alerts_query():
+    page = max(int(request.args.get("page", "1")), 1)
+    per_page = min(int(request.args.get("per_page", "50")), 200)
+    # statuses: comma-separated list, or empty → all (no filter)
+    # default: 'open' only — matches the typical "what's on my queue" mental model.
+    raw_statuses = request.args.get("statuses")
+    if raw_statuses is None:
+        statuses: list[str] | None = ["open"]
+    elif raw_statuses == "":
+        statuses = None     # explicit "show everything"
+    else:
+        statuses = [s for s in raw_statuses.split(",") if s in db.ALERT_STATUSES]
+    rows, total = db.query_alerts(
+        date_from=request.args.get("date_from"),
+        date_to=request.args.get("date_to"),
+        agent=request.args.get("agent"),
+        rule_id=request.args.get("rule_id"),
+        min_level=int(request.args["min_level"]) if request.args.get("min_level") else None,
+        group=request.args.get("group"),
+        search=request.args.get("q"),
+        statuses=statuses,
+        limit=per_page,
+        offset=(page - 1) * per_page,
+    )
+    return ok({
+        "rows":   [row_to_dict(r) for r in rows],
+        "total":  total,
+        "page":   page,
+        "per_page": per_page,
+    })
+
+
+@api_bp.route("/alerts/<int:aid>/explain", methods=["GET", "POST"])
+def alerts_explain(aid: int):
+    """Get or generate an AI explanation for this alert.
+
+    GET returns the cached explanation if present, else generates one.
+    POST always regenerates (used by the "refresh" button)."""
+    row = db.get_alert(aid)
+    if not row:
+        return err("alert not found", 404)
+
+    force = request.method == "POST" or request.args.get("refresh") == "1"
+    if not force:
+        cached = db.explanation_get(aid)
+        if cached:
+            return ok({
+                "content":    cached["content"],
+                "html":       render_md(cached["content"]),
+                "model":      cached["model"],
+                "created_at": cached["created_at"],
+                "from_cache": True,
+            })
+
+    # GET with no cache: do NOT auto-generate — the user must POST to opt in.
+    # Avoids burning Claude calls on every accidental row-expansion.
+    if request.method == "GET":
+        return ok({"content": None, "html": None, "from_cache": False,
+                   "not_generated": True})
+
+    try:
+        raw = json.loads(row["raw_json"]) if row["raw_json"] else {}
+    except json.JSONDecodeError:
+        raw = {}
+
+    try:
+        import time as _t
+        t0 = _t.time()
+        content, model_used = ai.explain(raw, alert_id=aid)
+        elapsed_ms = int((_t.time() - t0) * 1000)
+        db.ai_run_add(aid, "manual_explain", model_used, elapsed_ms, success=True)
+    except Exception as e:  # noqa: BLE001
+        db.ai_run_add(aid, "manual_explain", "(failed)", 0, success=False)
+        log.exception("AI explain failed for alert %s", aid)
+        return err(f"AI explanation failed: {e}", 500)
+
+    db.explanation_put(aid, content, model_used)
+    return ok({
+        "content":    content,
+        "html":       render_md(content),
+        "model":      model_used,
+        "created_at": None,
+        "from_cache": False,
+    })
+
+
+@api_bp.route("/alerts/<int:aid>/explain", methods=["DELETE"])
+def alerts_explain_clear(aid: int):
+    db.explanation_delete(aid)
+    db.chat_clear(aid)        # follow-ups only make sense with an explanation
+    return ok({"cleared": aid})
+
+
+def _chat_msg_html(msg: dict) -> dict:
+    """Render a chat message's content as HTML for client consumption."""
+    return {
+        "role":       msg["role"],
+        "content":    msg["content"],
+        "html":       render_md(msg["content"]),
+        "created_at": msg.get("created_at"),
+    }
+
+
+@api_bp.route("/alerts/<int:aid>/chat", methods=["GET"])
+def alerts_chat_list(aid: int):
+    if not db.get_alert(aid):
+        return err("alert not found", 404)
+    history = db.chat_history(aid)
+    return ok({"history": [_chat_msg_html(m) for m in history]})
+
+
+@api_bp.route("/alerts/<int:aid>/chat", methods=["POST"])
+def alerts_chat_send(aid: int):
+    row = db.get_alert(aid)
+    if not row:
+        return err("alert not found", 404)
+    p = request.get_json(force=True, silent=True) or {}
+    msg = (p.get("message") or "").strip()
+    if not msg:
+        return err("message required")
+
+    explanation_row = db.explanation_get(aid)
+    if not explanation_row:
+        return err("generate an AI explanation first")
+
+    try:
+        raw = json.loads(row["raw_json"]) if row["raw_json"] else {}
+    except json.JSONDecodeError:
+        raw = {}
+
+    history = db.chat_history(aid)
+
+    try:
+        import time as _t
+        t0 = _t.time()
+        reply, model_used = ai.chat(
+            alert_raw=raw,
+            explanation=explanation_row["content"],
+            history=history,
+            user_message=msg,
+        )
+        elapsed_ms = int((_t.time() - t0) * 1000)
+        db.ai_run_add(aid, "chat", model_used, elapsed_ms, success=True)
+    except Exception as e:  # noqa: BLE001
+        db.ai_run_add(aid, "chat", "(failed)", 0, success=False)
+        log.exception("AI chat failed for alert %s", aid)
+        return err(f"AI chat failed: {e}", 500)
+
+    db.chat_append(aid, "user", msg)
+    db.chat_append(aid, "assistant", reply)
+
+    full_history = db.chat_history(aid)
+    return ok({
+        "history": [_chat_msg_html(m) for m in full_history],
+        "model":   model_used,
+    })
+
+
+@api_bp.route("/alerts/<int:aid>/chat", methods=["DELETE"])
+def alerts_chat_clear(aid: int):
+    db.chat_clear(aid)
+    return ok({"cleared": aid})
+
+
+@api_bp.route("/alerts/<int:aid>", methods=["PATCH"])
+def alerts_ack(aid: int):
+    p = request.get_json(force=True, silent=True) or {}
+    status = p.get("status")
+    if status not in db.ALERT_STATUSES:
+        return err(f"status must be one of: {', '.join(db.ALERT_STATUSES)}")
+    try:
+        db.set_alert_status(aid, status, p.get("notes"))
+    except ValueError as e:
+        return err(str(e))
+    row = db.get_alert(aid)
+    if not row:
+        return err("not found", 404)
+    auth.audit("alert.status_change", "alert", aid,
+               {"new_status": status, "notes": p.get("notes")})
+    return ok(row_to_dict(row))
+
+
+@api_bp.route("/alerts/latest")
+def alerts_latest():
+    rows = db.latest_alerts(min_level=int(request.args.get("min_level", "7")),
+                            limit=int(request.args.get("limit", "10")))
+    return ok([row_to_dict(r) for r in rows])
+
+
+@api_bp.route("/alerts/<int:aid>")
+def alert_detail(aid: int):
+    row = db.get_alert(aid)
+    if not row:
+        return err("not found", 404)
+    return ok(row_to_dict(row))
+
+
+@api_bp.route("/alerts/export")
+def alerts_export():
+    rows, _ = db.query_alerts(
+        date_from=request.args.get("date_from"),
+        date_to=request.args.get("date_to"),
+        agent=request.args.get("agent"),
+        rule_id=request.args.get("rule_id"),
+        min_level=int(request.args["min_level"]) if request.args.get("min_level") else None,
+        group=request.args.get("group"),
+        search=request.args.get("q"),
+        limit=10000,
+    )
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["timestamp", "agent_name", "agent_ip", "rule_id", "rule_level",
+                "rule_description", "rule_groups", "location", "full_log"])
+    for r in rows:
+        w.writerow([r["timestamp"], r["agent_name"], r["agent_ip"],
+                    r["rule_id"], r["rule_level"], r["rule_description"],
+                    r["rule_groups"], r["location"], r["full_log"]])
+    data = buf.getvalue().encode("utf-8")
+    return send_file(
+        io.BytesIO(data), mimetype="text/csv",
+        as_attachment=True,
+        download_name=f"alerts-{datetime.utcnow():%Y%m%d-%H%M%S}.csv",
+    )
+
+
+@api_bp.route("/alerts/sync", methods=["POST"])
+def alerts_sync():
+    return ok(sync.sync_recent_alerts())
+
+
+# ---------- briefings API -------------------------------------------------
+
+@api_bp.route("/briefings")
+def briefings_list():
+    btype = request.args.get("type")
+    search = request.args.get("q")
+    rows = db.list_briefings(btype=btype, search=search)
+    return ok([{
+        "id": r["id"], "date": r["date"], "type": r["type"],
+        "assessment": r["assessment"], "size": r["size"],
+        "file_path": r["file_path"], "word_count":
+            parsers.briefing_word_count(r["content"]),
+    } for r in rows])
+
+
+@api_bp.route("/briefings/<int:bid>")
+def briefing_detail(bid: int):
+    row = db.get_briefing(bid)
+    if not row:
+        return err("not found", 404)
+    actions = parsers.extract_recommended_actions(row["content"])
+    return ok({
+        "id": row["id"], "date": row["date"], "type": row["type"],
+        "assessment": row["assessment"], "file_path": row["file_path"],
+        "html": render_md(row["content"]),
+        "word_count": parsers.briefing_word_count(row["content"]),
+        "actions": actions,
+    })
+
+
+@api_bp.route("/briefings/sync", methods=["POST"])
+def briefings_sync():
+    res = sync.sync_briefings()
+    return ok(res)
+
+
+# ---------- OSINT API -----------------------------------------------------
+
+@api_bp.route("/osint/<source>")
+def osint_lookup(source: str):
+    ioc = (request.args.get("ioc") or "").strip()
+    if not ioc:
+        return err("missing ioc")
+    force = request.args.get("force") == "1"
+    fn = {"virustotal": osint.virustotal,
+          "abuseipdb":  osint.abuseipdb,
+          "urlscan":    osint.urlscan}.get(source)
+    if not fn:
+        return err(f"unknown source: {source}", 404)
+    result = fn(ioc, force_refresh=force)
+    return jsonify(result)
+
+
+@api_bp.route("/osint/all")
+def osint_all():
+    ioc = (request.args.get("ioc") or "").strip()
+    if not ioc:
+        return err("missing ioc")
+    force = request.args.get("force") == "1"
+    return ok({"ioc": ioc, "type": parsers.detect_ioc_type(ioc),
+               "results": osint.run_all(ioc, force_refresh=force)})
+
+
+@api_bp.route("/osint/references")
+def osint_refs():
+    ioc = (request.args.get("ioc") or "").strip()
+    if not ioc:
+        return err("missing ioc")
+    return ok(db.osint_references(ioc))
+
+
+@api_bp.route("/osint/detect")
+def osint_detect():
+    ioc = (request.args.get("ioc") or "").strip()
+    return ok({"ioc": ioc, "type": parsers.detect_ioc_type(ioc)})
+
+
+# ---------- FP manager API ------------------------------------------------
+
+@api_bp.route("/fp/list")
+def fp_list():
+    rows = db.list_fps()
+    return ok([row_to_dict(r) for r in rows])
+
+
+@api_bp.route("/fp/rules-xml")
+def fp_rules_xml():
+    try:
+        xml = wazuh.read_local_rules()
+    except Exception as e:  # noqa: BLE001
+        return err(str(e), 500)
+    return ok({"xml": xml,
+               "parsed": wazuh.parse_existing_suppressions(xml)})
+
+
+@api_bp.route("/fp/rule-lookup")
+def fp_rule_lookup():
+    rid = (request.args.get("rule_id") or "").strip()
+    if not rid:
+        return err("missing rule_id")
+    # Best-effort: find an alert in our DB that matches this rule id.
+    with db.conn() as c:
+        row = c.execute(
+            "SELECT rule_id, rule_description, rule_level, rule_groups FROM alerts WHERE rule_id=? LIMIT 1",
+            (rid,),
+        ).fetchone()
+    if not row:
+        return ok({"rule_id": rid, "description": None, "level": None, "groups": []})
+    groups = []
+    try:
+        groups = json.loads(row["rule_groups"] or "[]")
+    except json.JSONDecodeError:
+        pass
+    return ok({"rule_id": rid, "description": row["rule_description"],
+               "level": row["rule_level"], "groups": groups})
+
+
+@api_bp.route("/fp/preview", methods=["POST"])
+def fp_preview():
+    p = request.get_json(force=True, silent=True) or {}
+    rid = (p.get("rule_id") or "").strip()
+    agent = (p.get("agent_name") or "").strip() or None
+    desc = (p.get("description") or "").strip()
+    if not rid or not desc:
+        return err("rule_id and description required")
+    try:
+        xml = wazuh.read_local_rules()
+    except Exception as e:  # noqa: BLE001
+        return err(str(e), 500)
+    new_rid = wazuh.next_local_rule_id(xml)
+    snippet = wazuh.build_suppression(rid, agent, desc, new_rid)
+    return ok({"new_rule_id": new_rid, "snippet": snippet})
+
+
+@api_bp.route("/fp/add", methods=["POST"])
+def fp_add():
+    p = request.get_json(force=True, silent=True) or {}
+    rid = (p.get("rule_id") or "").strip()
+    agent = (p.get("agent_name") or "").strip() or None
+    desc = (p.get("description") or "").strip()
+    if not rid or not desc:
+        return err("rule_id and description required")
+
+    try:
+        original = wazuh.read_local_rules()
+    except Exception as e:  # noqa: BLE001
+        return err(f"cannot read local_rules.xml: {e}", 500)
+
+    new_rid = wazuh.next_local_rule_id(original)
+    snippet = wazuh.build_suppression(rid, agent, desc, new_rid)
+    updated = wazuh.insert_into_group(original, snippet)
+
+    try:
+        wazuh.write_local_rules(updated)
+    except Exception as e:  # noqa: BLE001
+        return err(f"write failed: {e}", 500)
+
+    ok_verify, verify_out = wazuh.verify_config()
+    if not ok_verify:
+        # Roll back
+        try:
+            wazuh.write_local_rules(original)
+        except Exception:  # noqa: BLE001
+            log.exception("rollback also failed")
+        return err(f"verifyconf failed (rolled back): {verify_out[-500:]}", 400)
+
+    ok_restart, restart_out = wazuh.restart_manager()
+    if not ok_restart:
+        return err(f"manager restart failed: {restart_out[-500:]}", 500)
+
+    db.insert_fp(rid, agent, desc, new_rid, snippet)
+    db.refresh_fp_alert_counts()
+    auth.audit("fp.add", "wazuh_rule", new_rid,
+               {"suppresses": rid, "agent": agent, "description": desc})
+    return ok({"new_rule_id": new_rid, "verify": verify_out,
+               "restart": restart_out})
+
+
+@api_bp.route("/fp/<int:fp_id>", methods=["DELETE"])
+def fp_delete(fp_id: int):
+    with db.conn() as c:
+        row = c.execute("SELECT * FROM false_positives WHERE id=?", (fp_id,)).fetchone()
+    if not row:
+        return err("not found", 404)
+    try:
+        original = wazuh.read_local_rules()
+    except Exception as e:  # noqa: BLE001
+        return err(str(e), 500)
+    updated = wazuh.remove_rule_from_xml(original, row["wazuh_rule_id"])
+    try:
+        wazuh.write_local_rules(updated)
+    except Exception as e:  # noqa: BLE001
+        return err(f"write failed: {e}", 500)
+    ok_verify, verify_out = wazuh.verify_config()
+    if not ok_verify:
+        wazuh.write_local_rules(original)
+        return err(f"verifyconf failed (rolled back): {verify_out[-500:]}", 400)
+    wazuh.restart_manager()
+    db.delete_fp(fp_id)
+    auth.audit("fp.delete", "wazuh_rule", row["wazuh_rule_id"],
+               {"suppressed_rule": row["rule_id"]})
+    return ok({"deleted": fp_id})
+
+
+# ---------- actions API ---------------------------------------------------
+
+@api_bp.route("/actions")
+def actions_list():
+    rows = db.list_actions(
+        status=request.args.get("status"),
+        priority=request.args.get("priority"),
+        date_from=request.args.get("date_from"),
+        date_to=request.args.get("date_to"),
+    )
+    return ok([dict(r) for r in rows])
+
+
+@api_bp.route("/actions/stats")
+def actions_stats():
+    return ok(db.action_stats())
+
+
+@api_bp.route("/actions/<int:aid>", methods=["PATCH"])
+def actions_update(aid: int):
+    p = request.get_json(force=True, silent=True) or {}
+    status = p.get("status")
+    notes = p.get("notes")
+    if status not in (None, "open", "in_progress", "resolved"):
+        return err("invalid status")
+    if status:
+        db.update_action_status(aid, status, notes)
+    return ok({"id": aid})
+
+
+# ---------- hosts API -----------------------------------------------------
+
+@api_bp.route("/hosts")
+def hosts_list():
+    return ok([dict(r) for r in db.list_hosts()])
+
+
+@api_bp.route("/hosts/<int:hid>", methods=["PATCH"])
+def hosts_update(hid: int):
+    p = request.get_json(force=True, silent=True) or {}
+    fields = {k: v for k, v in p.items() if k in {"hostname", "role", "notes"}}
+    if not fields:
+        return err("nothing to update")
+    db.update_host_fields(hid, **fields)
+    return ok(dict(db.get_host(hid) or {}))
+
+
+@api_bp.route("/hosts/<int:hid>", methods=["DELETE"])
+def hosts_delete(hid: int):
+    db.delete_host(hid)
+    return ok({"deleted": hid})
+
+
+@api_bp.route("/hosts", methods=["POST"])
+def hosts_add():
+    p = request.get_json(force=True, silent=True) or {}
+    ip = (p.get("ip") or "").strip()
+    if not ip:
+        return err("ip required")
+    db.upsert_host(ip, p.get("hostname"), p.get("role"), p.get("notes"))
+    return ok(dict(db.get_host_by_ip(ip) or {}))
+
+
+@api_bp.route("/hosts/<int:hid>/alerts")
+def hosts_alerts(hid: int):
+    h = db.get_host(hid)
+    if not h:
+        return err("not found", 404)
+    rows = db.alerts_for_host(h["ip"], limit=20)
+    if not rows and h["hostname"]:
+        rows = db.alerts_for_host(h["hostname"], limit=20)
+    return ok([row_to_dict(r) for r in rows])
+
+
+@api_bp.route("/hosts/refresh", methods=["POST"])
+def hosts_refresh():
+    n = sync.sync_agent_status()
+    return ok({"updated": n})
+
+
+# ---------- DNS / Threat Intel API ---------------------------------------
+
+@api_bp.route("/dns/today")
+def dns_today():
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    data = db.dns_get_daily(today)
+    if data:
+        return ok(data)
+    return ok({"date": today, "total_queries": 0, "blocked_queries": 0,
+               "top_queried": [], "top_blocked": [],
+               "per_client": [], "hourly": []})
+
+
+@api_bp.route("/dns/trend")
+def dns_trend():
+    return ok(db.dns_last_n_days(7))
+
+
+@api_bp.route("/dns/sync", methods=["POST"])
+def dns_sync():
+    n = int(request.args.get("days", "1"))
+    if n <= 1:
+        return ok(sync.sync_dns_today())
+    return ok({"days": sync.sync_dns_last_n(n)})
+
+
+@api_bp.route("/unifi/recent")
+def unifi_recent():
+    """UniFi events: alerts whose rule_groups or location indicate unifi."""
+    with db.conn() as c:
+        rows = c.execute(
+            """SELECT * FROM alerts
+               WHERE rule_groups LIKE '%unifi%' OR location LIKE '%unifi%'
+                  OR rule_description LIKE '%UniFi%'
+               ORDER BY timestamp DESC LIMIT 200"""
+        ).fetchall()
+    return ok([row_to_dict(r) for r in rows])
+
+
+@api_bp.route("/unifi/top-sources")
+def unifi_top_sources():
+    """Try to extract source IPs from full_log for the past 7 days."""
+    cutoff = (datetime.utcnow() - timedelta(days=7)).strftime("%Y-%m-%d")
+    src_re = re.compile(r"\bsrc=([0-9]{1,3}(?:\.[0-9]{1,3}){3})|\bSRC=([0-9.]+)|"
+                        r"\bfrom\s+([0-9]{1,3}(?:\.[0-9]{1,3}){3})")
+    counts: dict[str, int] = {}
+    with db.conn() as c:
+        rows = c.execute(
+            """SELECT full_log FROM alerts
+               WHERE (rule_groups LIKE '%unifi%' OR location LIKE '%unifi%')
+                 AND timestamp >= ?""", (cutoff,)).fetchall()
+    for r in rows:
+        log_line = r["full_log"] or ""
+        m = src_re.search(log_line)
+        if not m:
+            continue
+        ip = next((g for g in m.groups() if g), None)
+        if ip and not ip.startswith(("10.", "192.168.", "172.")):
+            counts[ip] = counts.get(ip, 0) + 1
+    top = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:10]
+    return ok([{"ip": ip, "count": n} for ip, n in top])
+
+
+# ---------- settings API --------------------------------------------------
+
+@api_bp.route("/settings/keys")
+def settings_keys():
+    return ok(osint.key_status())
+
+
+@api_bp.route("/settings/keys/<service>", methods=["POST"])
+def settings_set_key(service: str):
+    if service not in ("virustotal", "abuseipdb", "urlscan"):
+        return err("unknown service", 404)
+    p = request.get_json(force=True, silent=True) or {}
+    key = (p.get("key") or "").strip()
+    if not key:
+        return err("key required")
+    osint.set_key(service, key)
+    auth.audit("settings.api_key_set", "api_key", service)
+    return ok(osint.key_status())
+
+
+@api_bp.route("/settings/keys/<service>", methods=["DELETE"])
+def settings_clear_key(service: str):
+    if service not in ("virustotal", "abuseipdb", "urlscan"):
+        return err("unknown service", 404)
+    osint.clear_key(service)
+    auth.audit("settings.api_key_clear", "api_key", service)
+    return ok(osint.key_status())
+
+
+@api_bp.route("/settings/keys/<service>/test", methods=["POST"])
+def settings_test_key(service: str):
+    return jsonify(osint.test_key(service))
+
+
+@api_bp.route("/settings/theme", methods=["POST"])
+def settings_theme():
+    """Persist preferred theme (client mirrors in localStorage)."""
+    p = request.get_json(force=True, silent=True) or {}
+    theme = p.get("theme")
+    if theme not in config.THEMES:
+        return err("invalid theme")
+    db.setting_set("theme", theme)
+    return ok({"theme": theme})
+
+
+# ---------- pipeline API --------------------------------------------------
+
+@api_bp.route("/pipeline/status")
+def pipeline_status():
+    def serialise(row):
+        if not row:
+            return None
+        return dict(row)
+    return ok({
+        "collect": serialise(db.pipeline_last("collect")),
+        "analyse": serialise(db.pipeline_last("analyse")),
+        "next_collect": "05:50",
+        "next_analyse": "06:00",
+    })
+
+
+@api_bp.route("/pipeline/run", methods=["POST"])
+def pipeline_run():
+    p = request.get_json(force=True, silent=True) or {}
+    kind = p.get("kind")
+    if kind not in ("collect", "analyse", "weekly"):
+        return err("invalid kind")
+    return ok(sync.trigger_pipeline_script(kind))
+
+
+# ---------- home dashboard API -------------------------------------------
+#
+# Read-only endpoints consumed by the jacknet-home dashboard
+# (http://10.0.0.188:8090). LAN-only — no session auth.
+
+def _home_extract_summary(content: str) -> str:
+    """Pull the Executive Summary section out of a briefing markdown body,
+    strip markdown formatting, and trim. Falls back to the first 400 chars."""
+    if not content:
+        return ""
+    m = re.search(r"^##\s*Executive Summary\s*\n(.*?)(?=^##\s|\Z)",
+                  content, re.MULTILINE | re.DOTALL)
+    text = m.group(1) if m else content
+    # Cheap markdown strip — good enough for a 200-char preview.
+    text = re.sub(r"^#+\s*", "", text, flags=re.MULTILINE)   # headings
+    text = re.sub(r"[*_`]+", "", text)                       # emphasis / code
+    text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)     # links → label
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:400]
+
+
+@api_bp.route("/home/alerts")
+def home_alerts():
+    """Open-alert counts bucketed into P1/P2/P3 by Wazuh rule level.
+    P1 = level >= 12, P2 = level 10-11, P3 = level 7-9."""
+    with db.conn() as c:
+        row = c.execute(
+            """SELECT
+                 SUM(CASE WHEN rule_level >= 12 THEN 1 ELSE 0 END) AS p1,
+                 SUM(CASE WHEN rule_level BETWEEN 10 AND 11 THEN 1 ELSE 0 END) AS p2,
+                 SUM(CASE WHEN rule_level BETWEEN 7 AND 9 THEN 1 ELSE 0 END) AS p3,
+                 COUNT(*) AS open
+               FROM alerts
+               WHERE status = 'open'"""
+        ).fetchone()
+    return ok({
+        "open": int(row["open"] or 0),
+        "p1":   int(row["p1"]   or 0),
+        "p2":   int(row["p2"]   or 0),
+        "p3":   int(row["p3"]   or 0),
+    })
+
+
+@api_bp.route("/home/agents")
+def home_agents():
+    """Wazuh agent state, one row per configured host."""
+    out = []
+    for h in db.list_hosts():
+        status = (h["agent_status"] or "").lower()
+        out.append({
+            "name":   h["hostname"] or h["ip"],
+            "ip":     h["ip"],
+            "status": "online" if status in ("active", "connected", "online") else "offline",
+        })
+    return ok(out)
+
+
+@api_bp.route("/home/briefing")
+def home_briefing():
+    """Most recent daily briefing — date, severity, assessment preview."""
+    row = db.latest_briefing("daily")
+    if not row:
+        return ok(None)
+    return ok({
+        "date":          row["date"],
+        "assessment":    _home_extract_summary(row["content"]),
+        "severity":      row["assessment"],
+        "bookstack_url": "",  # populated once briefings are wired to BookStack
+    })
+
+
+@api_bp.route("/home/pipeline")
+def home_pipeline():
+    """Latest run of each requested pipeline kind. The home dashboard
+    drives the kind list and the labels — we just report what's in the
+    database. ?kinds=collect,analyse,weekly (defaults to the known set)."""
+    req = request.args.get("kinds")
+    if req:
+        kinds = [k.strip() for k in req.split(",") if k.strip()]
+    else:
+        kinds = list(config.SIEM_SCRIPTS.keys())
+
+    out = []
+    for kind in kinds:
+        r = db.pipeline_last(kind)
+        if not r:
+            out.append({"kind": kind, "name": kind,
+                        "status": "fail", "ran_at": None})
+        else:
+            out.append({
+                "kind":   kind,
+                "name":   kind,   # caller overrides with its own label
+                "status": "ok" if r["success"] else "fail",
+                "ran_at": r["finished_at"] or r["started_at"],
+            })
+    return ok(out)
+
+
+@api_bp.route("/home/pipeline/run", methods=["POST"])
+def home_pipeline_run():
+    """LAN-only trigger for a pipeline script — same body as /pipeline/run
+    but bypasses session auth so the home dashboard can call it. Kind is
+    validated against SIEM_SCRIPTS so callers can't run arbitrary commands."""
+    p = request.get_json(force=True, silent=True) or {}
+    kind = p.get("kind")
+    if kind not in config.SIEM_SCRIPTS:
+        return err("invalid kind")
+    return ok(sync.trigger_pipeline_script(kind))
+
+
+@api_bp.route("/home/actions")
+def home_actions():
+    """Counts of recommended actions, grouped by status."""
+    with db.conn() as c:
+        rows = c.execute(
+            "SELECT status, COUNT(*) AS n FROM recommended_actions GROUP BY status"
+        ).fetchall()
+    counts = {"open": 0, "in_progress": 0, "resolved": 0}
+    for r in rows:
+        if r["status"] in counts:
+            counts[r["status"]] = int(r["n"])
+    return ok(counts)
+
+
+# ---------- wazuh status -------------------------------------------------
+
+@api_bp.route("/wazuh/status")
+def wazuh_status():
+    return ok(wazuh.connection_status())
+
+
+@api_bp.route("/pollers/status")
+def pollers_status():
+    return ok(sync.poller_status())
+
+
+@api_bp.route("/backup/download/<kind>")
+def backup_download(kind: str):
+    if kind not in ("config", "full", "data"):
+        return err("kind must be config|full|data")
+    try:
+        data, filename, _size = backup.stream_to_browser(kind)
+    except Exception as e:  # noqa: BLE001
+        return err(str(e), 500)
+    return send_file(
+        io.BytesIO(data), mimetype="application/octet-stream",
+        as_attachment=True, download_name=filename,
+    )
+
+
+@api_bp.route("/backup/nas/config", methods=["GET"])
+def backup_nas_get():
+    cfg = backup.nas_config_get()
+    return ok(cfg or {})
+
+
+@api_bp.route("/backup/nas/config", methods=["POST"])
+def backup_nas_set():
+    p = request.get_json(force=True, silent=True) or {}
+    host = (p.get("host") or "").strip()
+    user = (p.get("user") or "").strip()
+    path = (p.get("remote_path") or "").strip()
+    if not host or not user or not path:
+        return err("host, user, remote_path all required")
+    backup.nas_config_set(host, user, path)
+    return ok({"saved": True})
+
+
+@api_bp.route("/backup/nas/config", methods=["DELETE"])
+def backup_nas_clear():
+    backup.nas_config_clear()
+    return ok({"cleared": True})
+
+
+@api_bp.route("/backup/nas/push", methods=["POST"])
+def backup_nas_push():
+    p = request.get_json(force=True, silent=True) or {}
+    kind = p.get("kind", "config")
+    if kind not in ("config", "full"):
+        return err("kind must be config|full")
+    cfg = backup.nas_config_get()
+    if not cfg:
+        return err("NAS backup target not configured")
+    try:
+        res = backup.push_to_nas(kind, cfg["host"], cfg["user"], cfg["remote_path"])
+    except Exception as e:  # noqa: BLE001
+        return err(str(e), 500)
+    return ok(res)
+
+
+@api_bp.route("/backup/history")
+def backup_history_get():
+    rows = db.backup_list(50)
+    return ok([dict(r) for r in rows])
+
+
+@api_bp.route("/host-config", methods=["GET"])
+def host_config_get():
+    cfg = config.host_config()
+    # Never return the SSH private-key path's contents — just the path string.
+    return ok({
+        "wazuh_host":             cfg.get("wazuh_host", ""),
+        "wazuh_user":             cfg.get("wazuh_user", "wazuh"),
+        "claudedev_host":         cfg.get("claudedev_host", ""),
+        "claudedev_user":         cfg.get("claudedev_user", "dev"),
+        "adguard_host":           cfg.get("adguard_host", ""),
+        "adguard_user":           cfg.get("adguard_user", ""),
+        "adguard_querylog_path":  cfg.get("adguard_querylog_path", ""),
+        "ssh_key_path":           cfg.get("ssh_key_path", ""),
+        "siem_scripts_dir":       cfg.get("siem_scripts_dir", ""),
+        "claude_cli_path":        cfg.get("claude_cli_path", ""),
+        "is_prod":                config.IS_PROD,
+    })
+
+
+@api_bp.route("/host-config", methods=["POST"])
+def host_config_set():
+    p = request.get_json(force=True, silent=True) or {}
+    allowed = {"wazuh_host", "wazuh_user", "claudedev_host", "claudedev_user",
+               "adguard_host", "adguard_user", "adguard_querylog_path",
+               "ssh_key_path", "siem_scripts_dir", "claude_cli_path"}
+    updates = {k: (v or "").strip() if isinstance(v, str) else v
+               for k, v in p.items() if k in allowed}
+    config.host_config_set(updates)
+    auth.audit("settings.host_config_update", "host_config", None,
+               {"updated_keys": list(updates.keys())})
+    return ok({"updated": list(updates.keys())})
+
+
+@api_bp.route("/host-config/test", methods=["POST"])
+def host_config_test():
+    """Run quick reachability checks against each configured host."""
+    results: dict[str, dict] = {}
+
+    cfg = config.host_config()
+    key = cfg.get("ssh_key_path")
+
+    def probe(name: str, host: str, user: str, key: str | None,
+              cmd: list[str] | None = None) -> dict:
+        if not host:
+            return {"configured": False, "reachable": False}
+        import subprocess
+        argv = ["ssh"]
+        if key:
+            argv += ["-i", key]
+        argv += ["-o", "BatchMode=yes",
+                 "-o", "StrictHostKeyChecking=accept-new",
+                 "-o", "ConnectTimeout=5",
+                 f"{user}@{host}", "--"]
+        argv += cmd or ["true"]
+        try:
+            cp = subprocess.run(argv, capture_output=True, timeout=10, check=False)
+            return {
+                "configured": True,
+                "reachable": cp.returncode == 0,
+                "stderr": cp.stderr.decode(errors="replace")[:200],
+            }
+        except Exception as e:  # noqa: BLE001
+            return {"configured": True, "reachable": False, "stderr": str(e)[:200]}
+
+    results["wazuh"] = probe("wazuh", cfg.get("wazuh_host", ""),
+                             cfg.get("wazuh_user", "wazuh"), key)
+    results["claudedev"] = probe("claudedev", cfg.get("claudedev_host", ""),
+                                 cfg.get("claudedev_user", "dev"), key)
+    results["adguard"] = probe("adguard", cfg.get("adguard_host", ""),
+                               cfg.get("adguard_user", ""), key)
+    return ok(results)
+
+
+@api_bp.route("/users")
+def users_list():
+    rows = db.list_users()
+    return ok([{"id": r["id"], "username": r["username"], "role": r["role"],
+                "created_at": r["created_at"], "last_login_at": r["last_login_at"],
+                "disabled": bool(r["disabled"])} for r in rows])
+
+
+@api_bp.route("/users", methods=["POST"])
+def users_create():
+    p = request.get_json(force=True, silent=True) or {}
+    username = (p.get("username") or "").strip()
+    password = p.get("password") or ""
+    if not username or len(password) < 8:
+        return err("username and 8+ char password required")
+    if db.get_user_by_username(username):
+        return err("username taken")
+    uid = db.insert_user(username, auth.hash_password(password), role=p.get("role") or "user")
+    auth.audit("user.create", "user", uid, {"username": username})
+    return ok({"id": uid})
+
+
+@api_bp.route("/users/<int:uid>", methods=["PATCH"])
+def users_update(uid: int):
+    p = request.get_json(force=True, silent=True) or {}
+    if p.get("password"):
+        if len(p["password"]) < 8:
+            return err("password too short")
+        db.update_user_password(uid, auth.hash_password(p["password"]))
+        auth.audit("user.password_change", "user", uid)
+    if "disabled" in p:
+        db.disable_user(uid, bool(p["disabled"]))
+        auth.audit("user.disable" if p["disabled"] else "user.enable", "user", uid)
+    return ok({"id": uid})
+
+
+@api_bp.route("/users/<int:uid>", methods=["DELETE"])
+def users_delete(uid: int):
+    me = auth.current_user()
+    if me and me["id"] == uid:
+        return err("cannot delete yourself")
+    db.delete_user(uid)
+    auth.audit("user.delete", "user", uid)
+    return ok({"deleted": uid})
+
+
+@api_bp.route("/audit-log")
+def audit_get():
+    rows = db.audit_list(
+        limit=int(request.args.get("limit", "200")),
+        action=request.args.get("action"),
+        target_type=request.args.get("target_type"),
+    )
+    return ok([dict(r) for r in rows])
+
+
+@api_bp.route("/me")
+def me():
+    u = auth.current_user()
+    if not u:
+        return err("not authenticated", 401)
+    return ok({"id": u["id"], "username": u["username"], "role": u["role"]})
+
+
+@api_bp.route("/ai/usage")
+def ai_usage():
+    """Recent AI invocation counts for the settings page meter."""
+    return ok({
+        "auto_explain_24h":   db.ai_runs_count("auto_explain", 24),
+        "manual_explain_24h": db.ai_runs_count("manual_explain", 24),
+        "chat_24h":           db.ai_runs_count("chat", 24),
+        "daily_cap":          int(os.environ.get("SOC_AI_DAILY_CAP", "20")),
+    })
+
+
+# ---------- webhooks API --------------------------------------------------
+
+def _webhook_row_to_dict(w) -> dict:
+    return {
+        "id":            w["id"],
+        "name":          w["name"],
+        "platform":      w["platform"],
+        # never return the decrypted URL to the client
+        "url_hint":      "configured · ****" + (config.decrypt(w["url_encrypted"]) or "")[-6:],
+        "severity_min":  w["severity_min"],
+        "include_ai":    bool(w["include_ai"]),
+        "enabled":       bool(w["enabled"]),
+        "dedup_minutes": w["dedup_minutes"],
+        "created_at":    w["created_at"],
+        "last_used_at":  w["last_used_at"],
+        "last_error":    w["last_error"],
+    }
+
+
+@api_bp.route("/webhooks")
+def webhooks_list():
+    return ok([_webhook_row_to_dict(w) for w in db.list_webhooks()])
+
+
+@api_bp.route("/webhooks", methods=["POST"])
+def webhooks_create():
+    p = request.get_json(force=True, silent=True) or {}
+    name = (p.get("name") or "").strip()
+    platform = (p.get("platform") or "").strip().lower()
+    url = (p.get("url") or "").strip()
+    if not name:
+        return err("name required")
+    if platform not in notifications.SUPPORTED_PLATFORMS:
+        return err(f"platform must be one of: {', '.join(notifications.SUPPORTED_PLATFORMS)}")
+    if not url.startswith("http"):
+        return err("url must be an http(s) URL")
+    sev = int(p.get("severity_min", 7))
+    include_ai = bool(p.get("include_ai", True))
+    dedup_minutes = int(p.get("dedup_minutes", 240))
+    wid = db.insert_webhook(name, platform, config.encrypt(url),
+                            sev, include_ai, dedup_minutes)
+    return ok({"id": wid})
+
+
+@api_bp.route("/webhooks/<int:wid>", methods=["PATCH"])
+def webhooks_update(wid: int):
+    p = request.get_json(force=True, silent=True) or {}
+    updates: dict = {}
+    if "name" in p: updates["name"] = str(p["name"]).strip()
+    if "platform" in p:
+        if p["platform"] not in notifications.SUPPORTED_PLATFORMS:
+            return err("invalid platform")
+        updates["platform"] = p["platform"]
+    if "url" in p and p["url"]:
+        if not str(p["url"]).startswith("http"):
+            return err("url must be http(s)")
+        updates["url_encrypted"] = config.encrypt(p["url"])
+    if "severity_min" in p: updates["severity_min"] = int(p["severity_min"])
+    if "include_ai"   in p: updates["include_ai"]   = 1 if p["include_ai"] else 0
+    if "enabled"      in p: updates["enabled"]      = 1 if p["enabled"] else 0
+    if "dedup_minutes" in p: updates["dedup_minutes"] = int(p["dedup_minutes"])
+    if not updates:
+        return err("nothing to update")
+    db.update_webhook(wid, **updates)
+    return ok({"id": wid})
+
+
+@api_bp.route("/webhooks/<int:wid>", methods=["DELETE"])
+def webhooks_delete(wid: int):
+    db.delete_webhook(wid)
+    return ok({"deleted": wid})
+
+
+@api_bp.route("/webhooks/<int:wid>/test", methods=["POST"])
+def webhooks_test(wid: int):
+    w = db.get_webhook(wid)
+    if not w:
+        return err("not found", 404)
+    success, resp = notifications.test_webhook(w)
+    return ok({"success": success, "response": resp})
+
+
+# ---------- factory -------------------------------------------------------
+
+def create_app() -> Flask:
+    config.ensure_dirs()
+    db.init_db()
+    # Idempotent bootstrap on every start — fast if everything's already there.
+    try:
+        sync.first_run_bootstrap()
+    except Exception:  # noqa: BLE001
+        log.exception("first_run_bootstrap failed")
+
+    # Background pollers: only if NOT running under systemd-timer mode.
+    # When `SOC_POLLERS=systemd` the timer units handle scheduling, so the
+    # in-process pollers stay dormant.
+    poller_mode = os.environ.get("SOC_POLLERS", "inprocess")
+    if poller_mode == "inprocess":
+        if not os.environ.get("WERKZEUG_RUN_MAIN") or os.environ.get("WERKZEUG_RUN_MAIN") == "true":
+            try:
+                sync.start_background_pollers()
+            except Exception:  # noqa: BLE001
+                log.exception("start_background_pollers failed")
+    else:
+        log.info("In-process pollers disabled (SOC_POLLERS=%s)", poller_mode)
+
+    app = Flask(__name__,
+                static_folder="static",
+                template_folder="templates")
+    app.secret_key = auth.get_or_create_secret_key()
+    # Session cookies: 30 days, secure if behind HTTPS (set via env)
+    from datetime import timedelta as _td
+    app.permanent_session_lifetime = _td(days=30)
+    app.config.update(
+        SESSION_COOKIE_HTTPONLY=True,
+        SESSION_COOKIE_SAMESITE="Lax",
+        SESSION_COOKIE_SECURE=os.environ.get("SOC_COOKIE_SECURE", "0") == "1",
+    )
+
+    app.register_blueprint(auth.auth_bp)
+    app.register_blueprint(pages_bp)
+    app.register_blueprint(api_bp)
+
+    @app.before_request
+    def _enforce_auth():
+        # Make every session permanent so the 30-day lifetime applies
+        from flask import session as _s
+        _s.permanent = True
+        return auth.login_required_globally()
+
+    # Expose current user to all templates (used in nav for the user menu)
+    @app.context_processor
+    def _inject_user():
+        return {"current_user": auth.current_user()}
+
+    @app.errorhandler(404)
+    def not_found(_e):
+        if request.path.startswith("/api/"):
+            return err("not found", 404)
+        return render_template("base.html",
+                               theme=config.DEFAULT_THEME,
+                               body="<div class='card'><h1>404</h1><p>Not found.</p></div>"), 404
+
+    return app
+
+
+def _cli_run_oneshot(kind: str) -> int:
+    """One-shot poller mode for systemd timers (no Flask server)."""
+    config.ensure_dirs()
+    db.init_db()
+    if kind == "alerts":
+        result = sync.sync_recent_alerts()
+    elif kind == "dns":
+        result = sync.sync_dns_today()
+    elif kind == "agents":
+        result = sync.sync_agent_status()
+    elif kind == "bootstrap":
+        result = sync.first_run_bootstrap()
+    else:
+        print(f"unknown kind: {kind}", flush=True)
+        return 2
+    print(f"[{kind}] {result}", flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+    # systemd-timer one-shot mode: `python app.py --run alerts`
+    if len(sys.argv) >= 3 and sys.argv[1] == "--run":
+        sys.exit(_cli_run_oneshot(sys.argv[2]))
+
+    # Normal server mode. Setting this env var suppresses the in-process
+    # background pollers (systemd timers handle them instead).
+    app = create_app()
+    app.run(host=config.LISTEN_HOST, port=config.LISTEN_PORT, debug=False)

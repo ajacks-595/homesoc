@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}False Positive Manager{% endblock %}
+{% block view_toggle %}{% endblock %}
+{% block body %}
+
+<div class="flex-row" style="justify-content:space-between; margin-bottom:14px">
+  <h1>False Positive Manager</h1>
+  <div class="flex-row">
+    <button class="secondary" onclick="SOC.fpRefresh()">↻ Reload from Wazuh</button>
+    <button onclick="SOC.fpOpenAdd()">+ Add Suppression</button>
+  </div>
+</div>
+
+<div id="fp-banner-host"></div>
+
+<div class="card">
+  <h2>Active Suppressions</h2>
+  <table class="data" id="fp-table">
+    <thead><tr>
+      <th>Local Rule ID</th>
+      <th>Suppresses</th>
+      <th>Agent Scope</th>
+      <th>Description</th>
+      <th>Created</th>
+      <th>Alerts Prevented</th>
+      <th></th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+</div>
+
+<div class="card">
+  <h2>Raw <code>local_rules.xml</code></h2>
+  <pre class="pre" id="fp-raw" style="max-height:280px; overflow-y:auto"></pre>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>SOC.initFp();</script>
+{% endblock %}

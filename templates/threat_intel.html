@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% block title %}Threat Intel{% endblock %}
+{% block view_toggle %}{% endblock %}
+{% block body %}
+
+<div class="flex-row" style="justify-content:space-between; margin-bottom:14px">
+  <h1>Threat Intelligence</h1>
+  <div class="view-toggle" id="ti-tabs">
+    <button data-tab="dns"   class="{% if tab == 'dns' %}active{% endif %}">DNS Deep Dive</button>
+    <button data-tab="unifi" class="{% if tab == 'unifi' %}active{% endif %}">UniFi Firewall</button>
+  </div>
+</div>
+
+<!-- ===== DNS ===== -->
+<div id="ti-dns" class="{% if tab != 'dns' %}hidden{% endif %}">
+  <div class="flex-row" style="margin-bottom:8px">
+    <button class="secondary" onclick="SOC.dnsSync()">↻ Sync AdGuard log</button>
+    <select id="dns-filter">
+      <option value="all">All queries</option>
+      <option value="blocked">Blocked only</option>
+      <option value="allowed">Allowed only</option>
+    </select>
+    <input type="text" id="dns-client" placeholder="Filter by client IP" style="min-width:160px">
+    <span class="muted small" id="dns-updated"></span>
+  </div>
+
+  <div class="card-row cols-3">
+    <div class="metric"><div class="label">Total Queries Today</div><div class="value mono" id="dns-q">—</div></div>
+    <div class="metric danger"><div class="label">Blocked</div><div class="value mono" id="dns-b">—</div></div>
+    <div class="metric warn"><div class="label">Block Rate</div><div class="value mono" id="dns-r">—</div></div>
+  </div>
+
+  <div class="card-row cols-2">
+    <div class="card">
+      <h2>Top 20 Queried Domains</h2>
+      <table class="data" id="dns-top-queried"><tbody></tbody></table>
+    </div>
+    <div class="card">
+      <h2>Top 20 Blocked Domains</h2>
+      <table class="data" id="dns-top-blocked"><tbody></tbody></table>
+    </div>
+  </div>
+
+  <div class="card-row cols-2">
+    <div class="card">
+      <h2>Client Breakdown</h2>
+      <table class="data" id="dns-clients">
+        <thead><tr><th>Client</th><th>Hostname</th><th>Queries</th><th>Blocked</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="card">
+      <h2>Hourly Timeline</h2>
+      <div class="chart-wrap"><canvas id="chart-hourly"></canvas></div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== UniFi ===== -->
+<div id="ti-unifi" class="{% if tab != 'unifi' %}hidden{% endif %}">
+  <div class="card-row cols-2">
+    <div class="card">
+      <h2>Top Source IPs (7 days)</h2>
+      <table class="data" id="unifi-top"><tbody></tbody></table>
+    </div>
+    <div class="card">
+      <h2>Geographic Distribution</h2>
+      <div id="unifi-geo" class="muted">
+        Loading… (derived from AbuseIPDB cache when available)
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Recent Inbound Events</h2>
+    <table class="data" id="unifi-events">
+      <thead><tr>
+        <th>Timestamp</th><th>Agent</th><th>Source IP</th>
+        <th>Event</th><th>Action</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>SOC.initThreatIntel({{ tab|tojson }});</script>
+{% endblock %}

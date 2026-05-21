@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HomeSOC — First-Run Setup</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/themes.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}">
+</head>
+<body class="theme-{{ theme }}">
+  <main style="max-width:480px; margin:6vh auto;">
+    <div class="card">
+      <h1>First-run setup</h1>
+      <p class="muted small">Create your admin account. Once created, all future
+         requests will require authentication. Password is hashed with PBKDF2-SHA256
+         (200,000 iterations) and stored locally.</p>
+      {% if error %}<div class="banner danger">{{ error }}</div>{% endif %}
+      <form method="POST" action="/setup" class="flex-col" style="gap:12px">
+        <div><label>Username</label>
+          <input type="text" name="username" required autofocus minlength="2" style="width:100%"></div>
+        <div><label>Password (min 8 chars)</label>
+          <input type="password" name="password" required minlength="8" style="width:100%"></div>
+        <button type="submit" style="width:100%">Create admin account</button>
+      </form>
+    </div>
+  </main>
+</body>
+</html>

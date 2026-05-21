@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Recommended Actions{% endblock %}
+{% block view_toggle %}{% endblock %}
+{% block body %}
+
+<div class="flex-row" style="justify-content:space-between; margin-bottom:14px">
+  <h1>Recommended Actions</h1>
+  <div class="flex-row">
+    <select id="a-priority"><option value="">All priorities</option>
+      <option>P1</option><option>P2</option><option>P3</option>
+    </select>
+    <input type="date" id="a-from">
+    <input type="date" id="a-to">
+    <button class="secondary" onclick="SOC.actionsLoad()">Apply</button>
+  </div>
+</div>
+
+<div class="card-row cols-4" id="action-stats">
+  <div class="metric danger"><div class="label">Avg P1 Resolve (h)</div><div class="value" id="as-p1">—</div></div>
+  <div class="metric warn"><div class="label">Avg P2 Resolve (h)</div><div class="value" id="as-p2">—</div></div>
+  <div class="metric muted"><div class="label">Avg P3 Resolve (h)</div><div class="value" id="as-p3">—</div></div>
+  <div class="metric ok"><div class="label">Resolved This Week</div><div class="value" id="as-wk">—</div></div>
+</div>
+
+<div class="kanban" id="kanban">
+  <div class="kanban-col" data-status="open">
+    <h3>Open <span class="count" id="kc-open">0</span></h3>
+    <div class="kanban-cards" data-drop="open"></div>
+  </div>
+  <div class="kanban-col" data-status="in_progress">
+    <h3>In Progress <span class="count" id="kc-inprog">0</span></h3>
+    <div class="kanban-cards" data-drop="in_progress"></div>
+  </div>
+  <div class="kanban-col" data-status="resolved">
+    <h3>Resolved <span class="count" id="kc-resolved">0</span></h3>
+    <div class="kanban-cards" data-drop="resolved"></div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>SOC.initActions();</script>
+{% endblock %}

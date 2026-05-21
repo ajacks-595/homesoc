@@ -1,0 +1,144 @@
+{% extends "base.html" %}
+{% block title %}Settings{% endblock %}
+{% block view_toggle %}{% endblock %}
+{% block body %}
+
+<h1>Settings</h1>
+
+<div class="card" id="host-config-card">
+  <h2>Hosts &amp; Connections</h2>
+  <p class="muted small">SSH connection details for the external components this
+     dashboard talks to. Leave a host blank if you're not running that component —
+     features depending on it will gracefully say "configure to enable".</p>
+  <div id="host-config-form" class="flex-col" style="gap:10px"></div>
+  <div class="flex-row" style="margin-top:10px">
+    <button onclick="SOC.hostConfigSave()">Save host config</button>
+    <button class="ghost" onclick="SOC.hostConfigTest()">Test connections</button>
+    <span id="host-config-status" class="muted small"></span>
+  </div>
+</div>
+
+<div class="card">
+  <div class="flex-row" style="justify-content:space-between">
+    <h2>Notifications &amp; Webhooks</h2>
+    <button onclick="SOC.webhookOpenAdd()">+ Add Webhook</button>
+  </div>
+  <p class="muted small">Push alerts to Mattermost, Slack, Discord, or any HTTPS endpoint.
+     The URL is encrypted with this machine's Fernet key and never returned to the browser.</p>
+  <table class="data" id="webhook-table">
+    <thead><tr>
+      <th>Name</th><th>Platform</th><th>Min Lvl</th>
+      <th>Dedup</th><th>AI?</th><th>Status</th><th>Last Used</th><th></th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+</div>
+
+<div class="card">
+  <h2>AI Usage (rolling 24h)</h2>
+  <div id="ai-usage"><div class="muted small">Loading…</div></div>
+</div>
+
+<div class="card">
+  <h2>Backup &amp; Restore</h2>
+  <p class="muted small">Snapshots use SQLite's online-backup API — safe even mid-write.
+     <strong>Config-only</strong> includes API keys, hosts, false positives, webhooks, users, recommended actions.
+     <strong>Full</strong> includes everything (alerts, briefings, OSINT cache, AI explanations, chat history).
+  </p>
+  <div class="flex-row" style="gap:8px; margin-bottom:10px">
+    <a class="btn" href="/api/backup/download/config">⬇ Download config backup</a>
+    <a class="btn secondary" href="/api/backup/download/full">⬇ Download full backup</a>
+  </div>
+  <div class="divider"></div>
+  <h3>Push to NAS (SCP)</h3>
+  <p class="muted small">Configure once, then run on demand. SSH key in use:
+     <code id="bk-key-path">/opt/dashboard/.ssh/id_ed25519</code>.
+     The target user's <code>authorized_keys</code> must include this key's pubkey.</p>
+  <div class="flex-row" style="gap:8px; margin-bottom:8px">
+    <input type="text" id="bk-host" placeholder="host (e.g. nas.local)" style="flex:1">
+    <input type="text" id="bk-user" placeholder="user" style="flex:1">
+    <input type="text" id="bk-path" placeholder="/volume1/Backups/soc-dashboard" style="flex:2">
+    <button class="small" onclick="SOC.backupNasSave()">Save target</button>
+  </div>
+  <div class="flex-row" style="gap:8px">
+    <button class="secondary" onclick="SOC.backupNasPush('config')">Push config now</button>
+    <button class="secondary" onclick="SOC.backupNasPush('full')">Push full now</button>
+    <button class="ghost danger" onclick="SOC.backupNasClear()">Clear target</button>
+  </div>
+  <div id="bk-status" class="muted small" style="margin-top:8px"></div>
+  <div class="divider"></div>
+  <h3>Recent backups</h3>
+  <table class="data" id="bk-history">
+    <thead><tr><th>Time</th><th>Kind</th><th>Destination</th><th>Size</th><th></th></tr></thead>
+    <tbody></tbody>
+  </table>
+</div>
+
+<div class="card-row cols-2">
+  <div class="card">
+    <h2>API Keys</h2>
+    <p class="muted small">Keys are encrypted at rest using a Fernet key derived from this machine's
+       <code>/etc/machine-id</code>. They will not decrypt on a different host.</p>
+
+    <div id="key-rows" class="flex-col"></div>
+  </div>
+
+  <div class="card">
+    <h2>Pipeline Status</h2>
+    <div class="flex-col" id="pipeline-rows"></div>
+
+    <div class="divider"></div>
+    <div class="flex-row">
+      <button class="secondary" onclick="SOC.pipelineRun('collect')">▶ Run Collection Now</button>
+      <button class="secondary" onclick="SOC.pipelineRun('analyse')">▶ Run Analysis Now</button>
+      <button class="ghost" onclick="SOC.pipelineRun('weekly')">▶ Run Weekly Now</button>
+    </div>
+    <div class="muted small" id="pipeline-output" style="margin-top:8px"></div>
+  </div>
+</div>
+
+<div class="card-row cols-2">
+  <div class="card">
+    <h2>Wazuh Connection</h2>
+    <div id="wazuh-conn"><div class="muted small">Checking…</div></div>
+  </div>
+
+  <div class="card">
+    <h2>Users</h2>
+    <table class="data" id="users-table">
+      <thead><tr><th>Username</th><th>Role</th><th>Last login</th><th>Status</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div class="flex-row" style="margin-top:10px">
+      <button onclick="SOC.userOpenAdd()">+ Add User</button>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Audit Log <span class="muted small">(recent 200)</span></h2>
+  <table class="data" id="audit-table" style="font-size:12px">
+    <thead><tr><th>Time</th><th>User</th><th>Action</th><th>Target</th><th>Details</th></tr></thead>
+    <tbody></tbody>
+  </table>
+</div>
+
+<div class="card-row cols-2">
+  <div class="card">
+    <h2>Theme</h2>
+    <p class="muted small">Choose your preferred colour scheme. Preference is saved locally and on the server.</p>
+    <div class="flex-row" id="theme-grid">
+      {% for t in themes %}
+      <div class="flex-col center" style="align-items:center">
+        <div class="theme-swatch" data-theme="{{ t }}" style="width:48px; height:48px" title="{{ t }}"></div>
+        <div class="small">{{ t }}</div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>SOC.initSettings();</script>
+{% endblock %}

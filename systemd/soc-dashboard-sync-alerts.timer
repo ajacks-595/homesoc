@@ -1,0 +1,11 @@
+[Unit]
+Description=SOC Dashboard alert sync timer (every 5 min)
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=5min
+Unit=soc-dashboard-sync@alerts.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target

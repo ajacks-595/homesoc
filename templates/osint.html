@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}OSINT Investigation{% endblock %}
+{% block view_toggle %}{% endblock %}
+{% block body %}
+
+<div class="card">
+  <div class="flex-row" style="justify-content:space-between">
+    <div>
+      <h3>Investigating</h3>
+      <h1 class="mono" id="ioc-value">{{ ioc or '—' }}</h1>
+      <div class="muted small">
+        Type: <span id="ioc-type">—</span>
+        <button class="ghost small" onclick="SOC.copyIoc()">Copy</button>
+      </div>
+    </div>
+    <div class="flex-row">
+      <input type="text" id="ioc-input" value="{{ ioc }}" placeholder="IP / domain / URL / hash" style="min-width:280px">
+      <button onclick="SOC.osintNavigate()">Investigate</button>
+      <button class="secondary" onclick="SOC.osintRunAll()">Run All</button>
+    </div>
+  </div>
+</div>
+
+<div class="card-row cols-3" id="osint-panels">
+  <div class="osint-panel" data-source="virustotal">
+    <h3><span class="source-name">VirusTotal</span>
+      <button class="small" onclick="SOC.osintRun('virustotal')">Run Lookup</button>
+    </h3>
+    <div class="result muted small">Not run.</div>
+  </div>
+  <div class="osint-panel" data-source="abuseipdb">
+    <h3><span class="source-name">AbuseIPDB</span>
+      <button class="small" onclick="SOC.osintRun('abuseipdb')">Run Lookup</button>
+    </h3>
+    <div class="result muted small">Not run.</div>
+  </div>
+  <div class="osint-panel" data-source="urlscan">
+    <h3><span class="source-name">URLScan</span>
+      <button class="small" onclick="SOC.osintRun('urlscan')">Run Lookup</button>
+    </h3>
+    <div class="result muted small">Not run.</div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>References in your data</h2>
+  <div id="ioc-refs"><div class="muted small">Loading…</div></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  SOC.initOsint({{ ioc|tojson }});
+</script>
+{% endblock %}

@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}Briefings{% endblock %}
+{% block view_toggle %}{% endblock %}
+{% block body %}
+
+<div class="flex-row" style="justify-content:space-between; margin-bottom:14px">
+  <h1>Briefings</h1>
+  <div class="flex-row">
+    <input type="search" id="b-search" placeholder="Search all briefings…" style="min-width:280px">
+    <button class="secondary" onclick="SOC.syncBriefings()">↻ Sync</button>
+  </div>
+</div>
+
+<div class="card-row cols-2">
+  <div>
+    <div class="card">
+      <h2>Daily Briefings</h2>
+      <div id="b-calendar-host"></div>
+    </div>
+    <div class="card">
+      <h2>Weekly Reports</h2>
+      <div id="b-weekly-list" class="flex-col"></div>
+    </div>
+  </div>
+
+  <div class="card" id="b-reader-card">
+    <div class="flex-row" style="justify-content:space-between">
+      <h2 id="b-reader-title">Select a briefing</h2>
+      <div class="muted small" id="b-reader-meta"></div>
+    </div>
+    <div class="divider"></div>
+    <div class="markdown" id="b-reader-body">
+      <p class="muted">Click any day on the calendar to read the briefing for that date.</p>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>SOC.initBriefings();</script>
+{% endblock %}

@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}HomeSOC{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/themes.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}">
+  <script>
+    // Apply persisted theme before paint to avoid FOUC
+    (function() {
+      var t = localStorage.getItem('soc-theme') || '{{ theme }}';
+      document.documentElement.dataset.theme = t;
+      document.addEventListener('DOMContentLoaded', function () {
+        document.body.className = 'theme-' + t;
+      });
+    })();
+  </script>
+</head>
+<body class="theme-{{ theme }}">
+  <header class="topbar">
+    <div class="brand">
+      <span class="dot"></span>
+      <span>HomeSOC</span>
+    </div>
+    <nav>
+      <a href="/"               data-route="/" >Overview</a>
+      <a href="/briefings"      data-route="/briefings">Briefings</a>
+      <a href="/alerts"         data-route="/alerts">Alerts</a>
+      <a href="/actions"        data-route="/actions">Actions</a>
+      <a href="/fp-manager"     data-route="/fp-manager">FP Manager</a>
+      <a href="/hosts"          data-route="/hosts">Hosts</a>
+      <a href="/threat-intel"   data-route="/threat-intel">Threat Intel</a>
+      <a href="/osint"          data-route="/osint">OSINT</a>
+      <a href="/settings"       data-route="/settings">Settings</a>
+    </nav>
+    <span class="spacer"></span>
+
+    {% block view_toggle %}
+    <div class="view-toggle" id="view-toggle">
+      <button data-view="minimal">Minimal</button>
+      <button data-view="soc">SOC</button>
+    </div>
+    {% endblock %}
+
+    <div class="theme-picker" title="Theme">
+      <div class="theme-swatch" data-theme="midnight"  title="Midnight"></div>
+      <div class="theme-swatch" data-theme="terminal"  title="Terminal"></div>
+      <div class="theme-swatch" data-theme="nordic"    title="Nordic"></div>
+      <div class="theme-swatch" data-theme="light"     title="Light"></div>
+    </div>
+
+    {% if current_user %}
+    <div class="flex-row" style="margin-left:12px; gap:8px">
+      <span class="muted small" title="Logged in as">{{ current_user.username }}</span>
+      <a href="/logout" class="ghost small" style="padding:4px 10px">Log out</a>
+    </div>
+    {% endif %}
+  </header>
+
+  <main id="main">
+    {% block body %}{% endblock %}
+    {{ body|safe if body }}
+  </main>
+
+  <div id="side-panel" class="side-panel">
+    <button class="close ghost small" onclick="SOC.closeSidePanel()">×</button>
+    <div id="side-panel-content"></div>
+  </div>
+
+  <div id="modal-root"></div>
+  <div id="toast-root" style="position:fixed; bottom:20px; right:20px; z-index:1000;"></div>
+
+  <script src="{{ url_for('static', filename='js/chart.min.js') }}"></script>
+  <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+  {% block scripts %}{% endblock %}
+
+  <script>
+    // Highlight active nav route
+    (function () {
+      var path = window.location.pathname;
+      document.querySelectorAll('.topbar nav a').forEach(function (a) {
+        if (a.dataset.route === path || (path === '/' && a.dataset.route === '/')) {
+          a.classList.add('active');
+        }
+      });
+    })();
+  </script>
+</body>
+</html>

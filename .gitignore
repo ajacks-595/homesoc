@@ -1,0 +1,54 @@
+# Runtime artifacts
+data/
+*.db
+*.db-shm
+*.db-wal
+*.log
+*.pid
+.env
+.env.local
+
+# Python
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Secrets — should never be committed
+secrets/
+*.pem
+*.key
+authorized_keys
+known_hosts
+id_ed25519*
+id_rsa*
+
+# Backups
+*.bak
+*.bak.*
+*.backup
+
+# Tests / coverage
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+
+# OS-specific
+*.exe
+.DS_Store

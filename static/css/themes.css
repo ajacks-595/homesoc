@@ -1,0 +1,74 @@
+/* Theme tokens — applied via body class. Default falls back to midnight. */
+
+body.theme-midnight, body {
+  --bg-primary:       #0d1117;
+  --bg-secondary:     #161b22;
+  --bg-card:          #21262d;
+  --text-primary:     #e6edf3;
+  --text-secondary:   #8b949e;
+  --accent:           #58a6ff;
+  --accent-secondary: #3fb950;
+  --danger:           #f85149;
+  --warning:          #d29922;
+  --border:           #30363d;
+  --font-stack:       -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --mono-stack:       ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo, Consolas, monospace;
+}
+
+body.theme-terminal {
+  --bg-primary:       #000000;
+  --bg-secondary:     #0a0a0a;
+  --bg-card:          #111111;
+  --text-primary:     #00ff41;
+  --text-secondary:   #008f11;
+  --accent:           #00ff41;
+  --accent-secondary: #00b300;
+  --danger:           #ff0000;
+  --warning:          #ffff00;
+  --border:           #003300;
+  --font-stack:       "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --mono-stack:       "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+/* CRT scanline overlay for terminal */
+body.theme-terminal::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 9999;
+  background-image: repeating-linear-gradient(
+    to bottom,
+    rgba(0,0,0,0.10) 0px,
+    rgba(0,0,0,0.10) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+  mix-blend-mode: multiply;
+}
+
+body.theme-nordic {
+  --bg-primary:       #2e3440;
+  --bg-secondary:     #3b4252;
+  --bg-card:          #434c5e;
+  --text-primary:     #eceff4;
+  --text-secondary:   #d8dee9;
+  --accent:           #88c0d0;
+  --accent-secondary: #a3be8c;
+  --danger:           #bf616a;
+  --warning:          #ebcb8b;
+  --border:           #4c566a;
+}
+
+body.theme-light {
+  --bg-primary:       #ffffff;
+  --bg-secondary:     #f6f8fa;
+  --bg-card:          #ffffff;
+  --text-primary:     #1f2328;
+  --text-secondary:   #636c76;
+  --accent:           #0969da;
+  --accent-secondary: #1a7f37;
+  --danger:           #cf222e;
+  --warning:          #9a6700;
+  --border:           #d0d7de;
+}
