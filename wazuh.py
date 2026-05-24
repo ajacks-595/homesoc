@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import logging
 import re
-import shlex
 import subprocess
 import xml.etree.ElementTree as ET
 from datetime import datetime
@@ -240,25 +239,35 @@ def build_suppression(parent_rule_id: str, agent_name: str | None,
 
 
 def insert_into_group(existing_xml: str, snippet: str) -> str:
-    """Append the rule snippet to the first <group> in the file, or wrap a new group."""
-    # If empty, build minimal scaffold.
-    if "<group" not in existing_xml:
-        return f'<group name="local,fp,">\n{snippet}</group>\n'
+    """Append a rule snippet inside the last <group>, separated from its
+    neighbours by exactly one blank line.
 
-    # Insert before the final </group>
+    Whitespace-normalising: the snippet "owns" one leading blank-line
+    separator, which is precisely what remove_rule_from_xml() strips back out.
+    That makes an insert followed by a remove of the same rule a byte-exact
+    inverse, so add/delete cycles in the FP manager don't drift the file."""
+    rule = snippet.strip("\n")
+    if "<group" not in existing_xml:
+        return f'<group name="local,fp,">\n\n{rule}\n\n</group>\n'
+
     idx = existing_xml.rfind("</group>")
-    if idx == -1:
-        return existing_xml + "\n" + snippet
-    return existing_xml[:idx] + snippet + existing_xml[idx:]
+    if idx == -1:                       # malformed: <group> with no close
+        return f"{existing_xml.rstrip()}\n\n{rule}\n"
+    head = existing_xml[:idx].rstrip()  # content before </group>, trailing ws dropped
+    tail = existing_xml[idx:]           # "</group>" + anything after it
+    return f"{head}\n\n{rule}\n\n{tail}"
 
 
 def remove_rule_from_xml(existing_xml: str, rule_id: str) -> str:
-    """Remove `<rule id="rule_id" ...>...</rule>` from the XML."""
+    """Remove `<rule id="rule_id" ...>...</rule>` and the single blank-line
+    separator preceding it — the exact inverse of insert_into_group(), so an
+    add/remove round-trip restores the file byte-for-byte. The trailing
+    separator is left intact (it belongs to the next element / the group close)."""
     pattern = re.compile(
-        r"\s*<rule\s+id=\"" + re.escape(rule_id) + r"\".*?</rule>\s*",
+        r"\n*[ \t]*<rule\s+id=\"" + re.escape(rule_id) + r"\".*?</rule>",
         re.DOTALL,
     )
-    return pattern.sub("\n", existing_xml)
+    return pattern.sub("", existing_xml)
 
 
 def parse_existing_suppressions(xml_text: str) -> list[dict[str, Any]]:
