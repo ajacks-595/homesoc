@@ -45,6 +45,10 @@ in case yours looks vaguely similar.
 - **Optional home consumer API** (`/api/home/*`) — token-gated, disabled by
   default, read-only unless you opt into mutations. For LAN wall-displays /
   status dashboards. SSE live-event stream included.
+- **Optional MCP server for interactive triage** — drive the dashboard from
+  Claude Code over SSH: list/search alerts, surface false-positive candidates,
+  run OSINT, request AI explanations, and (opt-in) resolve alerts or manage
+  Wazuh suppressions. Read-only by default; mutations are gated and audited.
 - **Backup**: SQLite snapshots (config-only or full) via browser download
   or SCP push to NAS
 - **4 themes** including a terminal-CRT mode with scanline overlay :sunglasses:
@@ -148,6 +152,7 @@ osint.py           # VT / AbuseIPDB / URLScan + cache
 ai.py              # Claude CLI integration, explain() + chat() + cross-log enrichment
 notifications.py   # Mattermost / Slack / Discord / generic webhooks
 backup.py          # SQLite online-backup, SCP push to NAS
+mcp_server.py      # Optional MCP server: interactive triage from Claude Code
 deploy.sh          # rsync + venv + systemd
 sudoers.d/         # Two sudoers files for target hosts
 systemd/           # 3 timer + 1 templated service unit
@@ -179,6 +184,45 @@ There's no SIEM pipeline bundled — the dashboard reads briefings from
 `/opt/siem/briefings/` but how those briefings get generated is up to
 you. The original deployment uses cron + the Claude CLI to produce them
 from Wazuh + AdGuard logs daily.
+
+## Interactive triage (MCP)
+
+An optional [Model Context Protocol](https://modelcontextprotocol.io) server
+(`mcp_server.py`) exposes the dashboard's data + actions as tools an
+interactive Claude Code session can call. It reuses the same SQLite DB and
+SSH-backed Wazuh helpers as the web UI — no second copy of anything.
+
+```bash
+# Install the optional extra (the dashboard itself doesn't need it)
+./venv/bin/pip install -r requirements-mcp.txt
+```
+
+Wire it into Claude Code by copying `mcp.json.example` to `.mcp.json`
+(gitignored) and editing the host/user/paths. It's spawned over SSH and speaks
+MCP over stdio:
+
+```json
+{
+  "mcpServers": {
+    "homesoc": {
+      "command": "ssh",
+      "args": ["wazuh@<host>", "/opt/dashboard/venv/bin/python -m mcp_server"]
+    }
+  }
+}
+```
+
+**Tools** — read: `status`, `list_alerts`, `search_alerts`, `get_alert`,
+`list_fp_candidates`, `get_suppressions`, `list_actions`, `get_briefing`,
+`osint_lookup`, `explain_alert`. Mutating (gated): `resolve_alert`,
+`bulk_resolve`, `add_suppression`, `delete_suppression`.
+
+**Security** — SSH is the auth boundary (whoever can spawn the server already
+has shell on the host). As defence-in-depth, mutating tools refuse unless
+`SOC_MCP_ALLOW_MUTATIONS=1` is set in the spawned environment, and every
+mutation is written to the audit log stamped `via: mcp`. The suppression flow
+reuses the same write → `wazuh-analysisd -t` verify → rollback-on-failure →
+restart path as the web UI. See `SECURITY.md`.
 
 ## Security model
 

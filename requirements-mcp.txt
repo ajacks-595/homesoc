@@ -1,0 +1,5 @@
+# Optional: interactive Claude Code triage via the Model Context Protocol.
+# Install only if you want the MCP server (mcp_server.py):
+#   ./venv/bin/pip install -r requirements-mcp.txt
+# The dashboard itself does not need this.
+mcp>=1.23,<2

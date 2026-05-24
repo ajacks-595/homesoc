@@ -1,0 +1,17 @@
+{
+  "//": "HomeSOC MCP server — interactive triage from Claude Code.",
+  "//1": "Copy to .mcp.json (gitignored) and edit host/user/paths. The server",
+  "//2": "is spawned over SSH and talks MCP over stdio. Whoever can SSH to the",
+  "//3": "dashboard host is trusted; mutations stay OFF unless you opt in below.",
+  "//4": "Local-dev variant: command='./venv/bin/python', args=['-m','mcp_server'].",
+  "mcpServers": {
+    "homesoc": {
+      "command": "ssh",
+      "args": [
+        "-i", "~/.ssh/collector_key",
+        "wazuh@10.0.0.213",
+        "SOC_MCP_ALLOW_MUTATIONS=0 SOC_MCP_OPERATOR=mcp /opt/dashboard/venv/bin/python -m mcp_server"
+      ]
+    }
+  }
+}

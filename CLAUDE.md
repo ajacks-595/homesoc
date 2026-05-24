@@ -557,6 +557,9 @@ soc-dashboard/                  (local dir name; published as "homesoc")
 ├── ai.py                       # Claude CLI integration: explain(), chat(), cross-log enrichment
 ├── notifications.py            # Mattermost/Slack/Discord/Generic formatters + dedup
 ├── backup.py                   # SQLite online-backup, config-only filter, SCP push
+├── mcp_server.py               # Optional MCP server (interactive Claude Code triage; stdio-over-SSH)
+├── requirements-mcp.txt        # Optional `mcp` SDK dep for mcp_server.py (not in core requirements)
+├── mcp.json.example            # Template for .mcp.json (gitignored when live)
 ├── deploy.sh                   # From-dev-host rsync + venv + systemd install
 ├── soc-dashboard.service       # Main service unit
 ├── systemd/                    # 4 timer units (alerts/dns/agents/briefings) + 1 templated service
@@ -747,6 +750,48 @@ systemctl list-timers | grep soc-dashboard
 - **Add a new poller**: extend `_poller_state` + `delayed()` calls in
   `sync.start_background_pollers()` + add a `--run <kind>` branch in
   `app._cli_run_oneshot()` + (optionally) drop a `.timer` unit in `systemd/`.
+- **Add an MCP tool**: add a `@mcp.tool()`-decorated function in
+  `mcp_server.py` with a clear docstring (it becomes the tool description) and
+  typed params (they become the JSON schema). Reuse `database.py` / `wazuh.py`
+  / `osint.py` / `ai.py` — never reimplement queries. Return via the `_ok()` /
+  `_error()` helpers. If it mutates state: guard with `if not
+  _mutations_enabled(): return _mutation_disabled()` at the top, and call
+  `_audit(...)` after the change. Do NOT call `auth.audit()` — there's no Flask
+  request context in the MCP process; `_audit()` writes via `db.audit_add`
+  directly with username `mcp` and `via: mcp`. Add a test to
+  `tests/test_mcp_server.py` (monkeypatch `mcp_server.wazuh` for SSH-backed
+  tools — see the existing add_suppression tests).
+
+## MCP triage server
+
+`mcp_server.py` is an optional Model Context Protocol server that lets an
+interactive Claude Code session triage the SOC. Transport is stdio, spawned
+over SSH (see `mcp.json.example`). It imports the dashboard's own modules and
+runs against the same DB — it is **not** a second service and adds no network
+listener.
+
+- **Security**: SSH is the auth boundary. Mutating tools (`resolve_alert`,
+  `bulk_resolve`, `add_suppression`, `delete_suppression`) are disabled unless
+  `SOC_MCP_ALLOW_MUTATIONS=1` is in the spawned env. Every mutation is audited
+  with `via: mcp`. Suppression tools reuse the web UI's verify→rollback→restart
+  flow verbatim.
+- **Dependency**: `mcp` SDK lives in `requirements-mcp.txt` (optional), pulled
+  into `requirements-dev.txt` so CI exercises `tests/test_mcp_server.py`. The
+  test module `pytest.importorskip("mcp")`s so core installs without the extra
+  still pass.
+- **Testing status**: unit-tested (read tools, mutation gate, suppression
+  orchestration + rollback with `wazuh` mocked, 12 tests) and **verified
+  against live prod on 2026-05-24** (wazuh-vm): read tools against the live
+  DB, real SSH read of `local_rules.xml`, stdio-over-SSH handshake from
+  claude-dev, `osint_lookup` (3/3 providers), `explain_alert` cached + a fresh
+  ~59s generation through the real Claude CLI, and a full `add_suppression` →
+  `delete_suppression` round-trip (real `wazuh-manager` restarts, audit rows
+  stamped `via=mcp`, `local_rules.xml` left semantically identical + valid).
+  `mcp_server.py` + `requirements-mcp.txt` are deployed and the `mcp` SDK is
+  installed in the prod venv. Note: the round-trip leaves `local_rules.xml`
+  whitespace-normalised (one blank line may shift) — a pre-existing quirk of
+  `wazuh.remove_rule_from_xml`, shared with the web FP manager, harmless and
+  verify-gated.
 
 ## Gotchas (paid for in blood — do not relearn these)
 

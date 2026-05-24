@@ -50,6 +50,34 @@ wall-display dashboard). It is **disabled by default** and hardened as follows:
 If you don't run a consumer, leave it disabled (the default) and `/api/home/*`
 stays closed.
 
+## The MCP triage server (`mcp_server.py`)
+
+HomeSOC ships an optional Model Context Protocol server so an interactive
+Claude Code session can triage alerts. It is **not** an additional network
+listener — it speaks MCP over stdio and is intended to be spawned over SSH:
+
+- **SSH is the auth boundary.** Whoever can spawn the process already has shell
+  access to the dashboard host (and thus the DB). The MCP server grants no
+  privilege that SSH access didn't already imply.
+- **Read-only by default.** State-changing tools (`resolve_alert`,
+  `bulk_resolve`, `add_suppression`, `delete_suppression`) return an error
+  unless `SOC_MCP_ALLOW_MUTATIONS=1` is set in the spawned environment. Read
+  tools always work.
+- **Audited.** Every mutation is written to the audit log with username
+  `SOC_MCP_OPERATOR` (default `mcp`) and a details payload stamped
+  `{"via": "mcp"}`, so MCP-originated changes are distinguishable from web-UI
+  changes after the fact.
+- **Same safe Wazuh path.** `add_suppression` / `delete_suppression` reuse the
+  web UI's write → `wazuh-analysisd -t` validate → roll-back-on-failure →
+  restart flow. Tools take structured arguments — callers cannot inject raw
+  XML or shell.
+- **No new secrets.** The server reuses the dashboard's machine-bound Fernet
+  key and configured API keys; it does not store or transmit credentials.
+
+Don't expose stdio MCP over anything other than trusted SSH. If you want it
+disabled entirely, simply don't install `requirements-mcp.txt` / don't add the
+`.mcp.json` entry.
+
 ## Known limitations
 
 - **No CSRF protection** — acceptable on single-user LAN; matters once you

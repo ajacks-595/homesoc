@@ -1,2 +1,3 @@
 -r requirements.txt
+-r requirements-mcp.txt   # so the MCP server tests run in CI
 pytest>=8.0

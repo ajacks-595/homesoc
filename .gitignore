@@ -31,6 +31,9 @@ Thumbs.db
 
 # Claude Code local settings (personal, machine-specific)
 .claude/settings.local.json
+# Live MCP config auto-spawns the server on every Claude Code session in this
+# dir — keep it local. Commit mcp.json.example as the template instead.
+.mcp.json
 
 # Secrets — should never be committed
 secrets/
