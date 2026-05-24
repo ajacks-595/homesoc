@@ -1,0 +1,11 @@
+[Unit]
+Description=HomeSOC briefings sync timer (hourly)
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=1h
+Unit=soc-dashboard-sync@briefings.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target

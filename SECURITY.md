@@ -28,6 +28,28 @@ internet without putting a hardened reverse proxy in front of it.
 - Every state-changing API endpoint records to the audit log
 - SSH commands use explicit argv lists; no `shell=True`
 
+## The home consumer API (`/api/home/*`)
+
+HomeSOC exposes an optional read-mostly API for a LAN consumer (e.g. a
+wall-display dashboard). It is **disabled by default** and hardened as follows:
+
+- **Default-OFF**: with no token configured, every `/api/home/*` route returns
+  403. A fresh deployment is never exposed until the operator opts in.
+- **Token-gated**: enable it by generating a token in Settings → Home Consumer
+  API. Callers send it as `X-HomeSOC-Token: <token>` (or `Authorization:
+  Bearer <token>`). The SSE stream `/api/home/events` also accepts `?token=`
+  since `EventSource` cannot set headers — prefer the header elsewhere.
+- **Constant-time comparison**: tokens are compared with `hmac.compare_digest`;
+  stored Fernet-encrypted at rest.
+- **Read-only by default**: the only mutating endpoint
+  (`POST /api/home/pipeline/run`) returns 403 even with a valid token unless
+  you explicitly enable mutations in Settings. Pipeline `kind` is validated
+  against an allowlist — callers can never run arbitrary commands. Mutations
+  are recorded in the audit log.
+
+If you don't run a consumer, leave it disabled (the default) and `/api/home/*`
+stays closed.
+
 ## Known limitations
 
 - **No CSRF protection** — acceptable on single-user LAN; matters once you

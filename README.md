@@ -42,6 +42,9 @@ in case yours looks vaguely similar.
 - **Webhook notifications** (Mattermost / Slack / Discord / generic JSON)
   with per-webhook severity thresholds and burst dedup
 - **Per-user auth** (PBKDF2-SHA256), session cookies, full audit log
+- **Optional home consumer API** (`/api/home/*`) — token-gated, disabled by
+  default, read-only unless you opt into mutations. For LAN wall-displays /
+  status dashboards. SSE live-event stream included.
 - **Backup**: SQLite snapshots (config-only or full) via browser download
   or SCP push to NAS
 - **4 themes** including a terminal-CRT mode with scanline overlay :sunglasses:

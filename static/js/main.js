@@ -1696,11 +1696,63 @@ const SOC = (() => {
   async function initSettings() {
     initThemePicker();    // wires every .theme-swatch[data-theme="..."]
     await Promise.all([
-      loadHostConfig(),
+      loadHostConfig(), loadHomeApi(),
       loadKeys(), loadPipeline(), loadWazuhStatus(),
       loadWebhooks(), loadAiUsage(), loadBackupConfig(), loadBackupHistory(),
       loadUsers(), loadAuditLog(),
     ]);
+  }
+
+  // ----- Home consumer API -----------------------------------------------
+
+  async function loadHomeApi() {
+    const r = await api("/api/settings/home-api");
+    if (!r.success) return;
+    const d = r.data;
+    const host = document.getElementById("home-api-status");
+    if (host) {
+      host.innerHTML = d.configured
+        ? `<div><span class="badge ok">enabled</span> token set · ····${escapeHtml(d.last4 || "")}</div>`
+        : `<div><span class="badge muted">disabled</span> no token — /api/home/* returns 403</div>`;
+    }
+    const mut = document.getElementById("home-api-mutations");
+    if (mut) {
+      mut.checked = !!d.mutations_enabled;
+      mut.onchange = async () => {
+        const r = await api("/api/settings/home-api/mutations", {
+          method: "POST", body: JSON.stringify({ enabled: mut.checked }) });
+        toast(r.success ? `Mutations ${mut.checked ? "enabled" : "disabled"}` : r.error,
+              r.success ? "info" : "danger");
+      };
+    }
+  }
+
+  async function homeApiGenerate() {
+    if (!confirm("Generate a new token? Any existing consumer using the old token will stop working until updated.")) return;
+    const r = await api("/api/settings/home-api/token", { method: "POST" });
+    if (!r.success) { toast(r.error, "danger"); return; }
+    const reveal = document.getElementById("home-api-token-reveal");
+    reveal.classList.remove("hidden");
+    reveal.innerHTML = `
+      <div class="banner warn">
+        <div style="flex:1">
+          <strong>Copy this token now — it won't be shown again:</strong>
+          <pre class="pre" style="margin-top:6px; user-select:all">${escapeHtml(r.data.token)}</pre>
+          <div class="tiny muted">Send it from your consumer as <code>X-HomeSOC-Token: &lt;token&gt;</code>
+          (or <code>?token=</code> on the SSE <code>/api/home/events</code> stream).</div>
+        </div>
+      </div>`;
+    loadHomeApi();
+  }
+
+  async function homeApiClear() {
+    if (!confirm("Disable the home API by clearing the token? /api/home/* will return 403 until you set a new one.")) return;
+    const r = await api("/api/settings/home-api/token", { method: "DELETE" });
+    if (r.success) {
+      toast("Home API disabled.", "info");
+      document.getElementById("home-api-token-reveal").classList.add("hidden");
+      loadHomeApi();
+    } else toast(r.error, "danger");
   }
 
   // ----- Host config -----------------------------------------------------
@@ -2179,6 +2231,7 @@ const SOC = (() => {
     backupNasSave, backupNasClear, backupNasPush,
     userOpenAdd, userSubmit,
     hostConfigSave, hostConfigTest,
+    homeApiGenerate, homeApiClear,
     // generic
     closeModal, closeSidePanel,
   };

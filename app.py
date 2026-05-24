@@ -945,15 +945,149 @@ def home_pipeline():
     return ok(out)
 
 
+@api_bp.route("/home/events")
+def home_events():
+    """SSE feed for the home dashboard.
+
+    Polls the alerts / actions / pipeline tables once a second and emits
+    typed events when state changes. Heartbeat every 25s so reverse
+    proxies don't idle-close the connection.
+
+    Events:
+      alert_new       — new high-severity (>=10) open alert appears
+      alert_p1_open   — count of open P1 (level>=12) alerts changes
+      action_added    — new recommended action appears
+      action_resolved — an action transitions to status=resolved
+      pipeline_run    — any pipeline kind completes (success or fail)
+      briefing_new    — a new daily briefing lands
+      heartbeat       — every 25s, keeps connection alive
+    """
+    import time as _t
+    from datetime import datetime as _dt
+    from flask import Response as _Response, stream_with_context as _swc
+
+    def gen():
+        # Snapshot baseline state on connect — we emit events for *changes*
+        # relative to this. Avoids dumping the whole history at every
+        # client reconnect.
+        with db.conn() as c:
+            seen_alerts = set(r["id"] for r in c.execute(
+                "SELECT id FROM alerts WHERE rule_level >= 10 AND status='open' "
+                "ORDER BY id DESC LIMIT 200").fetchall())
+            last_actions = {r["id"]: r["status"] for r in c.execute(
+                "SELECT id, status FROM recommended_actions ORDER BY id DESC LIMIT 200"
+            ).fetchall()}
+            last_pipeline = {}
+            for kind in config.SIEM_SCRIPTS.keys():
+                r = db.pipeline_last(kind)
+                last_pipeline[kind] = (r["id"], r["success"]) if r else (None, None)
+            latest_brief = db.latest_briefing("daily")
+            last_brief_id = latest_brief["id"] if latest_brief else None
+            p1_count = sum(1 for x in c.execute(
+                "SELECT id FROM alerts WHERE rule_level >= 12 AND status='open'"
+            ))
+
+        yield f"event: hello\ndata: {{\"as_of\": \"{_dt.utcnow().isoformat()}Z\"}}\n\n"
+        last_heartbeat = _t.monotonic()
+
+        while True:
+            try:
+                with db.conn() as c:
+                    # Alerts (rule_level>=10 = "interesting")
+                    rows = c.execute(
+                        "SELECT id, timestamp, agent_name, rule_id, rule_level, "
+                        "       rule_description "
+                        "FROM alerts "
+                        "WHERE rule_level >= 10 AND status='open' "
+                        "ORDER BY id DESC LIMIT 100"
+                    ).fetchall()
+                    for r in rows:
+                        if r["id"] in seen_alerts:
+                            continue
+                        seen_alerts.add(r["id"])
+                        payload = {
+                            "id": r["id"], "timestamp": r["timestamp"],
+                            "agent": r["agent_name"], "rule_id": r["rule_id"],
+                            "rule_level": r["rule_level"],
+                            "description": r["rule_description"],
+                        }
+                        yield f"event: alert_new\ndata: {json.dumps(payload)}\n\n"
+
+                    # P1 count change
+                    new_p1 = sum(1 for _ in c.execute(
+                        "SELECT id FROM alerts WHERE rule_level >= 12 AND status='open'"))
+                    if new_p1 != p1_count:
+                        p1_count = new_p1
+                        yield f"event: alert_p1_open\ndata: {{\"count\": {new_p1}}}\n\n"
+
+                    # Actions
+                    arows = c.execute(
+                        "SELECT id, status, priority, description "
+                        "FROM recommended_actions ORDER BY id DESC LIMIT 200"
+                    ).fetchall()
+                    new_actions = {r["id"]: r["status"] for r in arows}
+                    for a in arows:
+                        prev = last_actions.get(a["id"])
+                        if prev is None:
+                            yield ("event: action_added\n"
+                                   f"data: {json.dumps(dict(a))}\n\n")
+                        elif prev != a["status"] and a["status"] == "resolved":
+                            yield ("event: action_resolved\n"
+                                   f"data: {json.dumps({'id': a['id']})}\n\n")
+                    last_actions = new_actions
+
+                    # Pipelines
+                    for kind in config.SIEM_SCRIPTS.keys():
+                        p = db.pipeline_last(kind)
+                        if not p:
+                            continue
+                        prev_id, prev_ok = last_pipeline.get(kind, (None, None))
+                        if p["id"] != prev_id:
+                            last_pipeline[kind] = (p["id"], p["success"])
+                            data = {
+                                "kind": kind,
+                                "success": bool(p["success"]),
+                                "started_at": p["started_at"],
+                                "finished_at": p["finished_at"],
+                            }
+                            yield f"event: pipeline_run\ndata: {json.dumps(data)}\n\n"
+
+                    # Briefings
+                    b = db.latest_briefing("daily")
+                    if b and b["id"] != last_brief_id:
+                        last_brief_id = b["id"]
+                        data = {"date": b["date"], "assessment": b["assessment"]}
+                        yield f"event: briefing_new\ndata: {json.dumps(data)}\n\n"
+
+                # Heartbeat
+                if _t.monotonic() - last_heartbeat > 25:
+                    yield f"event: heartbeat\ndata: {{\"as_of\": \"{_dt.utcnow().isoformat()}Z\"}}\n\n"
+                    last_heartbeat = _t.monotonic()
+            except GeneratorExit:
+                return
+            except Exception:  # noqa: BLE001
+                log.exception("home_events tick failed")
+            _t.sleep(1.0)
+
+    return _Response(_swc(gen()), mimetype="text/event-stream",
+                     headers={
+                         "Cache-Control": "no-cache",
+                         "X-Accel-Buffering": "no",  # nginx: disable response buffering
+                     })
+
+
 @api_bp.route("/home/pipeline/run", methods=["POST"])
 def home_pipeline_run():
-    """LAN-only trigger for a pipeline script — same body as /pipeline/run
-    but bypasses session auth so the home dashboard can call it. Kind is
-    validated against SIEM_SCRIPTS so callers can't run arbitrary commands."""
+    """Token-gated trigger for a pipeline script. Reaches this handler only
+    if the home token is valid AND mutations are enabled (enforced in
+    auth.login_required_globally). Kind is validated against SIEM_SCRIPTS so
+    callers can't run arbitrary commands."""
     p = request.get_json(force=True, silent=True) or {}
     kind = p.get("kind")
     if kind not in config.SIEM_SCRIPTS:
         return err("invalid kind")
+    auth.audit("home_api.pipeline_run", "pipeline", kind,
+               {"via": "home_api", "remote_addr": request.remote_addr})
     return ok(sync.trigger_pipeline_script(kind))
 
 
@@ -1041,6 +1175,41 @@ def backup_nas_push():
 def backup_history_get():
     rows = db.backup_list(50)
     return ok([dict(r) for r in rows])
+
+
+@api_bp.route("/settings/home-api", methods=["GET"])
+def home_api_status():
+    token = auth.home_api_token_get()
+    return ok({
+        "configured":        bool(token),
+        "last4":             token[-4:] if token else None,
+        "mutations_enabled": auth.home_api_mutations_enabled(),
+    })
+
+
+@api_bp.route("/settings/home-api/token", methods=["POST"])
+def home_api_generate():
+    """Generate a fresh token. Returned ONCE here so the operator can copy it
+    into the consumer (jacknet-home). Not retrievable afterwards."""
+    token = auth.home_api_generate_token()
+    auth.audit("settings.home_api_token_generate", "home_api", None)
+    return ok({"token": token})
+
+
+@api_bp.route("/settings/home-api/token", methods=["DELETE"])
+def home_api_clear():
+    auth.home_api_token_clear()
+    auth.audit("settings.home_api_token_clear", "home_api", None)
+    return ok({"cleared": True})
+
+
+@api_bp.route("/settings/home-api/mutations", methods=["POST"])
+def home_api_mutations():
+    p = request.get_json(force=True, silent=True) or {}
+    enabled = bool(p.get("enabled"))
+    auth.home_api_set_mutations(enabled)
+    auth.audit("settings.home_api_mutations", "home_api", None, {"enabled": enabled})
+    return ok({"mutations_enabled": enabled})
 
 
 @api_bp.route("/host-config", methods=["GET"])
@@ -1321,6 +1490,33 @@ def create_app() -> Flask:
         _s.permanent = True
         return auth.login_required_globally()
 
+    # Security response headers on every response (defence-in-depth).
+    # HSTS is intentionally omitted until the dashboard is served over HTTPS
+    # (sending it over plain HTTP is meaningless and can lock out the host).
+    @app.after_request
+    def _security_headers(resp):
+        resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+        resp.headers.setdefault("X-Frame-Options", "DENY")
+        resp.headers.setdefault("Referrer-Policy", "no-referrer")
+        resp.headers.setdefault("Permissions-Policy",
+                                "geolocation=(), microphone=(), camera=()")
+        # CSP: self-only. Inline scripts/styles are used throughout the
+        # templates, so 'unsafe-inline' is required until those are refactored
+        # out. Still blocks external script/object loads and framing.
+        resp.headers.setdefault(
+            "Content-Security-Policy",
+            "default-src 'self'; "
+            "script-src 'self' 'unsafe-inline'; "
+            "style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data: https:; "
+            "object-src 'none'; "
+            "frame-ancestors 'none'; "
+            "base-uri 'self'")
+        if os.environ.get("SOC_COOKIE_SECURE", "0") == "1":
+            resp.headers.setdefault(
+                "Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+        return resp
+
     # Expose current user to all templates (used in nav for the user menu)
     @app.context_processor
     def _inject_user():
@@ -1347,6 +1543,8 @@ def _cli_run_oneshot(kind: str) -> int:
         result = sync.sync_dns_today()
     elif kind == "agents":
         result = sync.sync_agent_status()
+    elif kind == "briefings":
+        result = sync.sync_briefings()
     elif kind == "bootstrap":
         result = sync.first_run_bootstrap()
     else:

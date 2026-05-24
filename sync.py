@@ -318,15 +318,17 @@ def first_run_bootstrap() -> dict[str, object]:
 
 # Intervals in seconds. Override with env vars for tuning.
 import os as _os
-_POLL_ALERTS_S = int(_os.environ.get("SOC_POLL_ALERTS_S", "300"))   # 5 min
-_POLL_DNS_S    = int(_os.environ.get("SOC_POLL_DNS_S",    "3600"))  # 1 hour
-_POLL_AGENTS_S = int(_os.environ.get("SOC_POLL_AGENTS_S", "900"))   # 15 min
+_POLL_ALERTS_S    = int(_os.environ.get("SOC_POLL_ALERTS_S",    "300"))    # 5 min
+_POLL_DNS_S       = int(_os.environ.get("SOC_POLL_DNS_S",       "3600"))   # 1 hour
+_POLL_AGENTS_S    = int(_os.environ.get("SOC_POLL_AGENTS_S",    "900"))    # 15 min
+_POLL_BRIEFINGS_S = int(_os.environ.get("SOC_POLL_BRIEFINGS_S", "3600"))   # 1 hour
 
 _pollers_started = False
 _poller_state: dict[str, dict[str, object]] = {
-    "alerts":  {"last_run": None, "last_result": None, "last_error": None},
-    "dns":     {"last_run": None, "last_result": None, "last_error": None},
-    "agents":  {"last_run": None, "last_result": None, "last_error": None},
+    "alerts":    {"last_run": None, "last_result": None, "last_error": None},
+    "dns":       {"last_run": None, "last_result": None, "last_error": None},
+    "agents":    {"last_run": None, "last_result": None, "last_error": None},
+    "briefings": {"last_run": None, "last_result": None, "last_error": None},
 }
 
 
@@ -358,17 +360,21 @@ def start_background_pollers() -> None:
             _poller_loop(name, interval_s, fn)
         threading.Thread(target=go, daemon=True, name=f"poll-{name}").start()
 
-    delayed(10, "alerts", _POLL_ALERTS_S, sync_recent_alerts)
-    delayed(30, "dns",    _POLL_DNS_S,    sync_dns_today)
-    delayed(20, "agents", _POLL_AGENTS_S, sync_agent_status)
-    log.info("background pollers scheduled (alerts %ds, dns %ds, agents %ds)",
-             _POLL_ALERTS_S, _POLL_DNS_S, _POLL_AGENTS_S)
+    delayed(10, "alerts",    _POLL_ALERTS_S,    sync_recent_alerts)
+    delayed(30, "dns",       _POLL_DNS_S,       sync_dns_today)
+    delayed(20, "agents",    _POLL_AGENTS_S,    sync_agent_status)
+    delayed(40, "briefings", _POLL_BRIEFINGS_S, sync_briefings)
+    log.info("background pollers scheduled (alerts %ds, dns %ds, agents %ds, briefings %ds)",
+             _POLL_ALERTS_S, _POLL_DNS_S, _POLL_AGENTS_S, _POLL_BRIEFINGS_S)
 
 
 def poller_status() -> dict[str, object]:
     return {
         "running":    _pollers_started,
-        "intervals":  {"alerts_s": _POLL_ALERTS_S, "dns_s": _POLL_DNS_S, "agents_s": _POLL_AGENTS_S},
+        "intervals":  {"alerts_s":    _POLL_ALERTS_S,
+                       "dns_s":       _POLL_DNS_S,
+                       "agents_s":    _POLL_AGENTS_S,
+                       "briefings_s": _POLL_BRIEFINGS_S},
         "state":      _poller_state,
     }
 

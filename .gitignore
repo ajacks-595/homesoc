@@ -29,6 +29,9 @@ dist/
 .DS_Store
 Thumbs.db
 
+# Claude Code local settings (personal, machine-specific)
+.claude/settings.local.json
+
 # Secrets — should never be committed
 secrets/
 *.pem
@@ -48,6 +51,9 @@ htmlcov/
 .coverage
 .coverage.*
 coverage.xml
+
+# Repo review scanner artifacts (gitleaks/semgrep/pip-audit JSON, etc.)
+.repo-review/
 
 # OS-specific
 *.exe

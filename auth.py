@@ -99,9 +99,10 @@ def login_required_globally():
         return None
     if request.endpoint and request.endpoint.startswith("static"):
         return None
-    # Read-only home-dashboard endpoints — LAN-only consumers (jacknet-home).
+    # Home-consumer API (jacknet-home et al.): token-gated, NOT session-gated.
+    # Default-OFF — disabled entirely until an operator sets a token.
     if request.path.startswith("/api/home/"):
-        return None
+        return _enforce_home_token()
 
     # First-run: no users yet → force the setup flow
     if db.count_users() == 0:
@@ -110,7 +111,8 @@ def login_required_globally():
         # API: respond 401 + JSON instead of redirect
         if request.path.startswith("/api/"):
             from flask import jsonify
-            return jsonify({"success": False, "error": "setup required",
+            return jsonify({"success": False, "data": None,
+                            "error": "setup required",
                             "redirect": "/setup"}), 401
         return redirect("/setup")
 
@@ -120,9 +122,94 @@ def login_required_globally():
 
     if request.path.startswith("/api/"):
         from flask import jsonify
-        return jsonify({"success": False, "error": "authentication required",
+        return jsonify({"success": False, "data": None,
+                        "error": "authentication required",
                         "redirect": "/login"}), 401
     return redirect("/login?next=" + request.path)
+
+
+# ---------- Home-consumer API token --------------------------------------
+
+# The /api/home/* namespace serves a LAN consumer (e.g. jacknet-home wall
+# display). It is gated by a shared bearer token rather than a session cookie.
+# Security posture:
+#   - DEFAULT-OFF: with no token set, the whole namespace returns 403. A fork
+#     of HomeSOC is therefore NOT exposed until the operator opts in.
+#   - Read-only by default: mutating endpoints (POST/PUT/PATCH/DELETE) require
+#     a separate explicit flag, even with a valid token.
+#   - Token stored Fernet-encrypted in settings; compared in constant time.
+#   - Token accepted via `X-HomeSOC-Token` header or `Authorization: Bearer`.
+#     For the SSE endpoint (EventSource can't set headers) a `?token=` query
+#     param is also accepted — header is preferred everywhere else.
+
+_HOME_TOKEN_KEY = "home_api_token"
+_HOME_MUTATIONS_KEY = "home_api_allow_mutations"
+
+
+def home_api_token_get() -> str | None:
+    enc = db.setting_get(_HOME_TOKEN_KEY)
+    if not enc:
+        return None
+    return config.decrypt(enc)
+
+
+def home_api_token_set(token: str) -> None:
+    db.setting_set(_HOME_TOKEN_KEY, config.encrypt(token))
+
+
+def home_api_token_clear() -> None:
+    db.setting_set(_HOME_TOKEN_KEY, None)
+
+
+def home_api_generate_token() -> str:
+    """Generate, store, and return a fresh random token (shown once)."""
+    token = secrets.token_urlsafe(32)
+    home_api_token_set(token)
+    return token
+
+
+def home_api_mutations_enabled() -> bool:
+    return db.setting_get(_HOME_MUTATIONS_KEY) == "1"
+
+
+def home_api_set_mutations(enabled: bool) -> None:
+    db.setting_set(_HOME_MUTATIONS_KEY, "1" if enabled else "0")
+
+
+def _present_home_token() -> str | None:
+    """Extract the caller-supplied token from header or (SSE) query param."""
+    hdr = request.headers.get("X-HomeSOC-Token")
+    if hdr:
+        return hdr
+    authz = request.headers.get("Authorization", "")
+    if authz.startswith("Bearer "):
+        return authz[len("Bearer "):].strip()
+    # EventSource cannot set headers; allow ?token= for the SSE stream only.
+    if request.path == "/api/home/events":
+        q = request.args.get("token")
+        if q:
+            return q
+    return None
+
+
+def _enforce_home_token():
+    """Gate /api/home/*. Returns None to allow, or a JSON error response."""
+    from flask import jsonify
+    configured = home_api_token_get()
+    if not configured:
+        return jsonify({"success": False, "data": None,
+                        "error": "home API disabled — set a token in Settings"}), 403
+
+    presented = _present_home_token()
+    if not presented or not hmac.compare_digest(presented, configured):
+        return jsonify({"success": False, "data": None,
+                        "error": "invalid or missing home API token"}), 401
+
+    # Token valid. Gate mutations behind the explicit opt-in flag.
+    if request.method not in ("GET", "HEAD", "OPTIONS") and not home_api_mutations_enabled():
+        return jsonify({"success": False, "data": None,
+                        "error": "home API mutations are disabled"}), 403
+    return None
 
 
 def audit(action: str, target_type: str | None = None,

@@ -18,6 +18,24 @@
   </div>
 </div>
 
+<div class="card" id="home-api-card">
+  <h2>Home Consumer API <span class="muted small">(/api/home/*)</span></h2>
+  <p class="muted small">A token-gated, read-mostly API for a LAN consumer such as a
+     wall-display dashboard. <strong>Disabled by default</strong> — nothing under
+     <code>/api/home/*</code> responds until you generate a token. The consumer sends it
+     as an <code>X-HomeSOC-Token</code> header (or <code>?token=</code> for the SSE feed).</p>
+  <div id="home-api-status" class="flex-col" style="gap:8px"></div>
+  <div class="flex-row" style="margin-top:10px; gap:8px">
+    <button onclick="SOC.homeApiGenerate()">Generate / rotate token</button>
+    <button class="ghost danger" onclick="SOC.homeApiClear()">Disable (clear token)</button>
+  </div>
+  <div id="home-api-token-reveal" class="hidden" style="margin-top:10px"></div>
+  <div class="flex-row" style="margin-top:10px">
+    <label class="flex-row" style="gap:6px"><input type="checkbox" id="home-api-mutations">
+      <span class="small">Allow mutating calls (e.g. trigger pipeline runs) — leave off for read-only</span></label>
+  </div>
+</div>
+
 <div class="card">
   <div class="flex-row" style="justify-content:space-between">
     <h2>Notifications &amp; Webhooks</h2>
