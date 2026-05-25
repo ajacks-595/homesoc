@@ -90,14 +90,8 @@ def _run_claude(prompt: str, model: str, timeout: int = 180) -> str:
     else:
         if not config.CLAUDE_DEV_HOST:
             raise wazuh.NotConfigured("Claude CLI host is not configured")
-        argv = [
-            "ssh", "-i", config.SSH_KEY,
-            "-o", "BatchMode=yes",
-            "-o", "StrictHostKeyChecking=accept-new",
-            "-o", "ConnectTimeout=10",
-            f"{config.CLAUDE_DEV_USER}@{config.CLAUDE_DEV_HOST}",
-            "--", *cmd,
-        ]
+        # Reuse wazuh._ssh_argv so the host/user/key injection guard applies here too.
+        argv = wazuh._ssh_argv(config.CLAUDE_DEV_HOST, config.CLAUDE_DEV_USER, cmd)
         cp = subprocess.run(
             argv, input=prompt.encode(), capture_output=True, timeout=timeout, check=False,
         )

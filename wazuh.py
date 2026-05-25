@@ -4,9 +4,10 @@ from __future__ import annotations
 import logging
 import re
 import subprocess
-import xml.etree.ElementTree as ET
 from datetime import datetime
 from typing import Any
+
+import defusedxml.ElementTree as DET  # safe XML parsing (no entity expansion)
 
 import config
 
@@ -15,10 +16,39 @@ log = logging.getLogger("soc.wazuh")
 
 # ---------- shell helpers ---------------------------------------------------
 
+# SSH host/user/key come from the GUI-editable host_config. They are placed in
+# the ssh argv *before* "--", so a value beginning with "-" would be parsed by
+# ssh as an option (e.g. -oProxyCommand=...) — argument injection / RCE. These
+# patterns require a safe leading char and reject whitespace + shell metachars.
+_SSH_HOST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:\-]*$")        # hostname or IP(v4/v6)
+_SSH_USER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-]*$")
+_SSH_KEY_RE = re.compile(r"^[A-Za-z0-9/~][A-Za-z0-9._/~\-]*$")      # filesystem path
+
+
+def _safe_ssh(value: str, what: str, pattern: re.Pattern[str]) -> str:
+    if not isinstance(value, str) or not pattern.match(value):
+        raise ValueError(
+            f"refusing unsafe SSH {what} {value!r}: must match {pattern.pattern} "
+            "(guards against argument injection such as -oProxyCommand=...)"
+        )
+    return value
+
+
+def assert_safe_ssh(host: str, user: str, key: str) -> None:
+    """Validate SSH connection components before they hit an ssh/scp argv.
+    Raises ValueError on anything that could be parsed as an ssh option.
+    Reused by wazuh, ai (via _ssh_argv) and backup (scp to NAS)."""
+    _safe_ssh(host, "host", _SSH_HOST_RE)
+    _safe_ssh(user, "user", _SSH_USER_RE)
+    _safe_ssh(key, "key path", _SSH_KEY_RE)
+
+
 def _ssh_argv(host: str, user: str, remote_cmd: list[str], *,
               key: str | None = None) -> list[str]:
+    key = key or config.SSH_KEY
+    assert_safe_ssh(host, user, key)
     return [
-        "ssh", "-i", key or config.SSH_KEY,
+        "ssh", "-i", key,
         "-o", "BatchMode=yes",
         "-o", "StrictHostKeyChecking=accept-new",
         "-o", f"ConnectTimeout={min(config.SSH_TIMEOUT, 10)}",
@@ -101,8 +131,8 @@ def connection_status() -> dict[str, Any]:
     try:
         agents = list_agents()
         out["agent_count"] = sum(1 for a in agents if a["status"] != "no_agent")
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as e:  # noqa: BLE001 - agent count is best-effort
+        log.warning("agent count unavailable: %s", e)
     return out
 
 
@@ -275,9 +305,10 @@ def parse_existing_suppressions(xml_text: str) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     try:
         # Wrap in synthetic root so multiple top-level <group>s parse cleanly.
-        root = ET.fromstring(f"<root>{xml_text}</root>")
-    except ET.ParseError as e:
-        log.warning("local_rules.xml parse error: %s", e)
+        # defusedxml rejects entity-expansion / external-entity payloads.
+        root = DET.fromstring(f"<root>{xml_text}</root>")
+    except Exception as e:  # noqa: BLE001 - ParseError or any defuse rejection -> skip
+        log.warning("local_rules.xml parse failed: %s", e)
         return out
     for rule in root.iter("rule"):
         level = rule.get("level")

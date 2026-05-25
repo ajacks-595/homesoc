@@ -21,6 +21,7 @@ from typing import Iterator
 
 import config
 import database as db
+import wazuh
 
 log = logging.getLogger("soc.backup")
 
@@ -108,6 +109,9 @@ def push_to_nas(kind: str, host: str, user: str, remote_path: str,
     filename = make_filename(kind)
     tmp = Path("/tmp") / filename
     ssh_key = ssh_key or config.SSH_KEY
+    # NAS host/user/key are GUI-editable → validate before they hit the scp argv
+    # (same argument-injection guard as the ssh wrappers).
+    wazuh.assert_safe_ssh(host, user, ssh_key)
     try:
         if kind == "config":
             size = snapshot_config(str(tmp))

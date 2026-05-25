@@ -316,7 +316,7 @@ def alerts_chat_send(aid: int):
     row = db.get_alert(aid)
     if not row:
         return err("alert not found", 404)
-    p = request.get_json(force=True, silent=True) or {}
+    p = request.get_json(silent=True) or {}
     msg = (p.get("message") or "").strip()
     if not msg:
         return err("message required")
@@ -366,7 +366,7 @@ def alerts_chat_clear(aid: int):
 
 @api_bp.route("/alerts/<int:aid>", methods=["PATCH"])
 def alerts_ack(aid: int):
-    p = request.get_json(force=True, silent=True) or {}
+    p = request.get_json(silent=True) or {}
     status = p.get("status")
     if status not in db.ALERT_STATUSES:
         return err(f"status must be one of: {', '.join(db.ALERT_STATUSES)}")
@@ -549,7 +549,7 @@ def fp_rule_lookup():
 
 @api_bp.route("/fp/preview", methods=["POST"])
 def fp_preview():
-    p = request.get_json(force=True, silent=True) or {}
+    p = request.get_json(silent=True) or {}
     rid = (p.get("rule_id") or "").strip()
     agent = (p.get("agent_name") or "").strip() or None
     desc = (p.get("description") or "").strip()
@@ -566,7 +566,7 @@ def fp_preview():
 
 @api_bp.route("/fp/add", methods=["POST"])
 def fp_add():
-    p = request.get_json(force=True, silent=True) or {}
+    p = request.get_json(silent=True) or {}
     rid = (p.get("rule_id") or "").strip()
     agent = (p.get("agent_name") or "").strip() or None
     desc = (p.get("description") or "").strip()
@@ -654,7 +654,7 @@ def actions_stats():
 
 @api_bp.route("/actions/<int:aid>", methods=["PATCH"])
 def actions_update(aid: int):
-    p = request.get_json(force=True, silent=True) or {}
+    p = request.get_json(silent=True) or {}
     status = p.get("status")
     notes = p.get("notes")
     if status not in (None, "open", "in_progress", "resolved"):
@@ -673,7 +673,7 @@ def hosts_list():
 
 @api_bp.route("/hosts/<int:hid>", methods=["PATCH"])
 def hosts_update(hid: int):
-    p = request.get_json(force=True, silent=True) or {}
+    p = request.get_json(silent=True) or {}
     fields = {k: v for k, v in p.items() if k in {"hostname", "role", "notes"}}
     if not fields:
         return err("nothing to update")
@@ -689,7 +689,7 @@ def hosts_delete(hid: int):
 
 @api_bp.route("/hosts", methods=["POST"])
 def hosts_add():
-    p = request.get_json(force=True, silent=True) or {}
+    p = request.get_json(silent=True) or {}
     ip = (p.get("ip") or "").strip()
     if not ip:
         return err("ip required")
@@ -788,7 +788,7 @@ def settings_keys():
 def settings_set_key(service: str):
     if service not in ("virustotal", "abuseipdb", "urlscan"):
         return err("unknown service", 404)
-    p = request.get_json(force=True, silent=True) or {}
+    p = request.get_json(silent=True) or {}
     key = (p.get("key") or "").strip()
     if not key:
         return err("key required")
@@ -814,7 +814,7 @@ def settings_test_key(service: str):
 @api_bp.route("/settings/theme", methods=["POST"])
 def settings_theme():
     """Persist preferred theme (client mirrors in localStorage)."""
-    p = request.get_json(force=True, silent=True) or {}
+    p = request.get_json(silent=True) or {}
     theme = p.get("theme")
     if theme not in config.THEMES:
         return err("invalid theme")
@@ -840,7 +840,7 @@ def pipeline_status():
 
 @api_bp.route("/pipeline/run", methods=["POST"])
 def pipeline_run():
-    p = request.get_json(force=True, silent=True) or {}
+    p = request.get_json(silent=True) or {}
     kind = p.get("kind")
     if kind not in ("collect", "analyse", "weekly"):
         return err("invalid kind")
@@ -1082,6 +1082,8 @@ def home_pipeline_run():
     if the home token is valid AND mutations are enabled (enforced in
     auth.login_required_globally). Kind is validated against SIEM_SCRIPTS so
     callers can't run arbitrary commands."""
+    # Token-gated consumer (bearer token, not cookie auth → not CSRF-exposed);
+    # keep force=True so the consumer needn't set Content-Type: application/json.
     p = request.get_json(force=True, silent=True) or {}
     kind = p.get("kind")
     if kind not in config.SIEM_SCRIPTS:
@@ -1139,7 +1141,7 @@ def backup_nas_get():
 
 @api_bp.route("/backup/nas/config", methods=["POST"])
 def backup_nas_set():
-    p = request.get_json(force=True, silent=True) or {}
+    p = request.get_json(silent=True) or {}
     host = (p.get("host") or "").strip()
     user = (p.get("user") or "").strip()
     path = (p.get("remote_path") or "").strip()
@@ -1157,7 +1159,7 @@ def backup_nas_clear():
 
 @api_bp.route("/backup/nas/push", methods=["POST"])
 def backup_nas_push():
-    p = request.get_json(force=True, silent=True) or {}
+    p = request.get_json(silent=True) or {}
     kind = p.get("kind", "config")
     if kind not in ("config", "full"):
         return err("kind must be config|full")
@@ -1205,7 +1207,7 @@ def home_api_clear():
 
 @api_bp.route("/settings/home-api/mutations", methods=["POST"])
 def home_api_mutations():
-    p = request.get_json(force=True, silent=True) or {}
+    p = request.get_json(silent=True) or {}
     enabled = bool(p.get("enabled"))
     auth.home_api_set_mutations(enabled)
     auth.audit("settings.home_api_mutations", "home_api", None, {"enabled": enabled})
@@ -1233,7 +1235,7 @@ def host_config_get():
 
 @api_bp.route("/host-config", methods=["POST"])
 def host_config_set():
-    p = request.get_json(force=True, silent=True) or {}
+    p = request.get_json(silent=True) or {}
     allowed = {"wazuh_host", "wazuh_user", "claudedev_host", "claudedev_user",
                "adguard_host", "adguard_user", "adguard_querylog_path",
                "ssh_key_path", "siem_scripts_dir", "claude_cli_path"}
@@ -1295,7 +1297,7 @@ def users_list():
 
 @api_bp.route("/users", methods=["POST"])
 def users_create():
-    p = request.get_json(force=True, silent=True) or {}
+    p = request.get_json(silent=True) or {}
     username = (p.get("username") or "").strip()
     password = p.get("password") or ""
     if not username or len(password) < 8:
@@ -1309,7 +1311,7 @@ def users_create():
 
 @api_bp.route("/users/<int:uid>", methods=["PATCH"])
 def users_update(uid: int):
-    p = request.get_json(force=True, silent=True) or {}
+    p = request.get_json(silent=True) or {}
     if p.get("password"):
         if len(p["password"]) < 8:
             return err("password too short")
@@ -1386,7 +1388,7 @@ def webhooks_list():
 
 @api_bp.route("/webhooks", methods=["POST"])
 def webhooks_create():
-    p = request.get_json(force=True, silent=True) or {}
+    p = request.get_json(silent=True) or {}
     name = (p.get("name") or "").strip()
     platform = (p.get("platform") or "").strip().lower()
     url = (p.get("url") or "").strip()
@@ -1406,7 +1408,7 @@ def webhooks_create():
 
 @api_bp.route("/webhooks/<int:wid>", methods=["PATCH"])
 def webhooks_update(wid: int):
-    p = request.get_json(force=True, silent=True) or {}
+    p = request.get_json(silent=True) or {}
     updates: dict = {}
     if "name" in p: updates["name"] = str(p["name"]).strip()
     if "platform" in p:
