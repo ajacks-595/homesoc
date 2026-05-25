@@ -3,3 +3,4 @@ markdown>=3.5
 cryptography>=42.0
 requests>=2.31
 defusedxml>=0.7        # safe XML parsing for Wazuh local_rules.xml
+waitress>=3.0         # production WSGI server (single process + thread pool)

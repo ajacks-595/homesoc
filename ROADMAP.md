@@ -18,8 +18,10 @@ next dev session.
 ## Medium
 - [ ] Move hard-coded IPs/paths from `config.py` into a settings table so the
       app is configurable from `/settings` rather than requiring a code edit.
-- [ ] Replace Flask's dev server (which is what `app.py` currently starts)
-      with `waitress` or `gunicorn` for prod. Update the systemd `ExecStart`.
+- [x] Replace Flask's dev server with `waitress` for prod (single process +
+      thread pool, so in-process pollers still start once). `app.py` prefers
+      waitress automatically; no `ExecStart` change needed. `SOC_DEV_SERVER=1`
+      forces the Werkzeug reloader for local dev.
 - [ ] Schedule a periodic background sync (alerts every 30s, DNS hourly,
       agent status every 5min) using `apscheduler` or a simple thread. Right
       now everything is poll-on-request.

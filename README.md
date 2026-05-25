@@ -226,8 +226,10 @@ restart path as the web UI. See `SECURITY.md`.
 
 ## Security model
 
-**LAN-only by design.** No CSRF protection, dev-server (Flask),
-no rate-limiting on login. For wider exposure:
+**LAN-only by design.** Served by the `waitress` production WSGI server
+(threaded; `SOC_THREADS` to tune, `SOC_DEV_SERVER=1` for the Werkzeug
+reloader during local dev). No CSRF tokens (mitigated by `SameSite=Lax`
+session cookies), no rate-limiting on login. For wider exposure:
 
 1. Put it behind a reverse proxy (Caddy + Let's Encrypt is well-documented)
 2. Add rate limiting at the proxy

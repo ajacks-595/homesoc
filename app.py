@@ -1562,7 +1562,28 @@ if __name__ == "__main__":
     if len(sys.argv) >= 3 and sys.argv[1] == "--run":
         sys.exit(_cli_run_oneshot(sys.argv[2]))
 
-    # Normal server mode. Setting this env var suppresses the in-process
-    # background pollers (systemd timers handle them instead).
+    # Normal server mode. In-process pollers are started inside create_app()
+    # unless SOC_POLLERS=systemd.
     app = create_app()
-    app.run(host=config.LISTEN_HOST, port=config.LISTEN_PORT, debug=False)
+    host, port = config.LISTEN_HOST, config.LISTEN_PORT
+
+    # Prefer the waitress production WSGI server. It's a single process with a
+    # thread pool, so the in-process pollers (daemon threads) still start
+    # exactly once — unlike a multi-worker gunicorn, which would run N copies.
+    # Fall back to the Werkzeug dev server only if waitress is unavailable, or
+    # if SOC_DEV_SERVER=1 (handy for the auto-reloader during local dev).
+    if os.environ.get("SOC_DEV_SERVER") == "1":
+        log.warning("SOC_DEV_SERVER=1 → Werkzeug dev server (do not use in production)")
+        app.run(host=host, port=port, debug=False)
+    else:
+        try:
+            from waitress import serve
+        except ImportError:
+            log.warning("waitress not installed → Werkzeug dev server; "
+                        "`pip install waitress` for production")
+            app.run(host=host, port=port, debug=False)
+        else:
+            threads = int(os.environ.get("SOC_THREADS", "8"))
+            log.info("HomeSOC serving on http://%s:%s via waitress (threads=%d)",
+                     host, port, threads)
+            serve(app, host=host, port=port, threads=threads, ident="HomeSOC")
