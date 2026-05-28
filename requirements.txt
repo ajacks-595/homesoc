@@ -1,5 +1,6 @@
 Flask>=3.0
 markdown>=3.5
+nh3>=0.2.15           # HTML sanitization of rendered markdown (XSS defense)
 cryptography>=42.0
 requests>=2.31
 defusedxml>=0.7        # safe XML parsing for Wazuh local_rules.xml

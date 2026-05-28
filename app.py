@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import markdown as md_lib
+import nh3
 from flask import (
     Blueprint, Flask, abort, jsonify, render_template, request, send_file,
 )
@@ -64,11 +65,52 @@ def row_to_dict(row) -> dict:
     return d
 
 
+# Tags/attributes permitted in rendered markdown (briefings, AI explanations,
+# follow-up chat, exec summary). The rendered HTML is injected into the DOM via
+# innerHTML on the client, and the source can include AI/Claude output (which
+# runs with WebSearch/WebFetch), so raw HTML is NOT trusted. nh3 strips
+# <script>, on* event handlers, and dangerous URL schemes (javascript:, data:)
+# while preserving formatting — the root-cause fix for the stored-XSS surface.
+_MD_ALLOWED_TAGS = {
+    "a", "p", "br", "hr", "span", "div",
+    "h1", "h2", "h3", "h4", "h5", "h6",
+    "ul", "ol", "li", "dl", "dt", "dd",
+    "strong", "em", "b", "i", "u", "s", "del", "ins", "sup", "sub", "mark",
+    "code", "pre", "kbd", "samp", "var",
+    "blockquote", "q", "abbr", "cite",
+    "table", "thead", "tbody", "tfoot", "tr", "th", "td",
+    "caption", "col", "colgroup",
+    "img",
+}
+_MD_ALLOWED_ATTRS = {
+    "a":        {"href", "title"},
+    "img":      {"src", "alt", "title"},
+    "td":       {"align"},
+    "th":       {"align", "scope"},
+    "col":      {"span"},
+    "colgroup": {"span"},
+    "ol":       {"start"},
+}
+_MD_URL_SCHEMES = {"http", "https", "mailto"}
+
+
 def render_md(text: str) -> str:
-    return md_lib.markdown(
-        text,
+    """Render markdown to HTML, then sanitize against an allowlist.
+
+    Output is trusted by the client (injected via innerHTML), but the input can
+    contain attacker-influenced content (AI web-fetched threat intel, briefing
+    bodies). nh3 enforces the tag/attribute/URL-scheme allowlist below."""
+    raw = md_lib.markdown(
+        text or "",
         extensions=["fenced_code", "tables", "sane_lists", "nl2br"],
         output_format="html5",
+    )
+    return nh3.clean(
+        raw,
+        tags=_MD_ALLOWED_TAGS,
+        attributes=_MD_ALLOWED_ATTRS,
+        url_schemes=_MD_URL_SCHEMES,
+        link_rel="noopener noreferrer nofollow",
     )
 
 
