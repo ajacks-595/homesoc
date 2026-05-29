@@ -1186,6 +1186,10 @@ def upsert_host(ip: str, hostname: str | None = None, role: str | None = None,
 
 
 def update_host_fields(host_id: int, **fields: Any) -> None:
+    # Allowlist the column names interpolated into the UPDATE so the helper is
+    # injection-safe regardless of caller (values are already parameterised).
+    allowed = {"hostname", "role", "notes"}
+    fields = {k: v for k, v in fields.items() if k in allowed}
     if not fields:
         return
     cols = ", ".join(f"{k}=?" for k in fields)

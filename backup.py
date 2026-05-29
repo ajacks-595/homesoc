@@ -83,7 +83,7 @@ def make_filename(kind: str) -> str:
 def _secure_tmp() -> Path:
     """A 0600 temp path for an on-disk snapshot. The snapshot is a full copy of
     the DB (Fernet-encrypted secrets + session key), so it must not be written
-    to a predictable, world-readable /tmp name. mkstemp creates it owner-only;
+    to a predictable, world-readable temp name. mkstemp creates it owner-only;
     sqlite reopens it by path."""
     fd, path = tempfile.mkstemp(prefix="socbackup-", suffix=".sqlite")
     os.close(fd)
