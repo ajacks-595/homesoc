@@ -263,6 +263,8 @@ _MIGRATIONS = [
     ("alerts", "status",    "TEXT NOT NULL DEFAULT 'open'"),
     ("alerts", "ack_notes", "TEXT"),
     ("alerts", "acked_at",  "TEXT"),
+    ("users",  "totp_secret",  "TEXT"),                       # Fernet-encrypted
+    ("users",  "totp_enabled", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 
@@ -845,6 +847,13 @@ def update_user_password(user_id: int, password_hash: str) -> None:
     with conn() as c:
         c.execute("UPDATE users SET password_hash=? WHERE id=?",
                   (password_hash, user_id))
+
+
+def set_user_totp(user_id: int, secret_encrypted: str | None, enabled: bool) -> None:
+    """Store (or clear) a user's Fernet-encrypted TOTP secret + enabled flag."""
+    with conn() as c:
+        c.execute("UPDATE users SET totp_secret=?, totp_enabled=? WHERE id=?",
+                  (secret_encrypted, 1 if enabled else 0, user_id))
 
 
 def update_user_login(user_id: int) -> None:

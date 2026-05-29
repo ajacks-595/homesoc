@@ -24,6 +24,7 @@ import threading
 import time
 from typing import Any
 
+import pyotp
 from flask import g, redirect, request, session, url_for
 
 import config
@@ -132,12 +133,65 @@ def login_record_success(ip: str | None, username: str) -> None:
             _login_fails.pop(key, None)
 
 
+# ---------- TOTP 2FA (optional, per-user) ---------------------------------
+
+_TOTP_ISSUER = os.environ.get("SOC_TOTP_ISSUER", "HomeSOC")
+
+
+def _clean_code(code: str | None) -> str:
+    return (code or "").strip().replace(" ", "")
+
+
+def _user_totp(user_id: int):
+    """Return a pyotp.TOTP for the user's stored secret, or None."""
+    row = db.get_user(user_id)
+    if not row or not row["totp_secret"]:
+        return None
+    secret = config.decrypt(row["totp_secret"])
+    return pyotp.TOTP(secret) if secret else None
+
+
+def totp_begin_enroll(user: dict) -> dict:
+    """Generate a fresh secret (stored disabled until confirmed) and return it
+    plus an otpauth:// URI for the authenticator app."""
+    secret = pyotp.random_base32()
+    db.set_user_totp(user["id"], config.encrypt(secret), enabled=False)
+    uri = pyotp.TOTP(secret).provisioning_uri(name=user["username"], issuer_name=_TOTP_ISSUER)
+    return {"secret": secret, "otpauth_uri": uri}
+
+
+def totp_confirm_enroll(user_id: int, code: str) -> bool:
+    """Verify the first code against the pending secret; enable 2FA on success."""
+    t = _user_totp(user_id)
+    if not t or not t.verify(_clean_code(code), valid_window=1):
+        return False
+    db.set_user_totp(user_id, db.get_user(user_id)["totp_secret"], enabled=True)
+    return True
+
+
+def totp_verify(user_id: int, code: str) -> bool:
+    """Verify a login code against an *enabled* secret (±1 step for clock skew)."""
+    row = db.get_user(user_id)
+    if not row or not row["totp_enabled"]:
+        return False
+    t = _user_totp(user_id)
+    return bool(t and t.verify(_clean_code(code), valid_window=1))
+
+
+def totp_disable(user_id: int, code: str) -> bool:
+    """Disable 2FA — requires a currently-valid code (proves possession)."""
+    if not totp_verify(user_id, code):
+        return False
+    db.set_user_totp(user_id, None, enabled=False)
+    return True
+
+
 # ---------- Flask integration --------------------------------------------
 
 # Endpoints accessible without auth (login itself, the first-run setup page,
 # static assets). The middleware allows these through.
 PUBLIC_ENDPOINTS = {
-    "auth.login_page", "auth.login_submit",
+    "auth.login_page", "auth.login_submit", "auth.login_2fa",
     "auth.setup_page", "auth.setup_submit",
     "auth.logout",
     "static",
@@ -364,6 +418,12 @@ def login_submit():
                       {"iterations": _PBKDF2_ITERATIONS})
             except Exception:  # noqa: BLE001
                 log.warning("password rehash failed for user %s", row["id"])
+        # Second factor: hold the login until a valid TOTP code is supplied.
+        if row["totp_enabled"]:
+            session.pop("user_id", None)
+            session["pending_2fa_uid"] = row["id"]
+            return render_template("login.html", theme=config.DEFAULT_THEME,
+                                   totp=True, next=next_path)
         session["user_id"] = row["id"]
         db.update_user_login(row["id"])
         audit("user.login", "user", row["id"])
@@ -378,6 +438,35 @@ def login_submit():
     return render_template(
         "login.html", theme=config.DEFAULT_THEME,
         error="Invalid username or password.", next=next_path), 401
+
+
+@auth_bp.route("/login/2fa", methods=["POST"])
+def login_2fa():
+    """Second step of login for 2FA-enabled users: verify the TOTP code held
+    against the pending user id stored in the session by login_submit."""
+    uid = session.get("pending_2fa_uid")
+    next_path = request.form.get("next") or "/"
+    if not uid:
+        return redirect("/login")
+    ip = request.remote_addr
+    key = f"2fa:{uid}"
+    if login_throttle_check(ip, key) > 0:
+        return render_template("login.html", theme=config.DEFAULT_THEME, totp=True,
+                               error="Too many attempts. Try again shortly.",
+                               next=next_path), 429
+    if totp_verify(uid, request.form.get("code") or ""):
+        login_record_success(ip, key)
+        session.pop("pending_2fa_uid", None)
+        session["user_id"] = uid
+        db.update_user_login(uid)
+        audit("user.login", "user", uid, {"via": "totp"})
+        if not next_path.startswith("/") or next_path.startswith("//"):
+            next_path = "/"
+        return redirect(next_path)
+    login_record_failure(ip, key)
+    audit("user.login_2fa_failed", "user", uid)
+    return render_template("login.html", theme=config.DEFAULT_THEME, totp=True,
+                           error="Invalid authentication code.", next=next_path), 401
 
 
 @auth_bp.route("/logout")

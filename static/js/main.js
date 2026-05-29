@@ -1857,8 +1857,64 @@ const SOC = (() => {
       loadHostConfig(), loadHomeApi(),
       loadKeys(), loadPipeline(), loadWazuhStatus(),
       loadWebhooks(), loadAiUsage(), loadBackupConfig(), loadBackupHistory(),
-      loadUsers(), loadAuditLog(),
+      loadUsers(), loadAuditLog(), load2fa(),
     ]);
+  }
+
+  // ----- Two-factor auth (own account) -----------------------------------
+
+  async function load2fa() {
+    const host = document.getElementById("twofa-status");
+    if (!host) return;
+    const r = await api("/api/2fa/status");
+    if (!r.success) { host.innerHTML = `<span class="muted small">—</span>`; return; }
+    if (r.data.enabled) {
+      host.innerHTML = `
+        <div><span class="badge ok">enabled</span> Two-factor authentication is active.</div>
+        <div class="flex-row" style="gap:6px">
+          <input type="text" id="twofa-disable-code" placeholder="current 6-digit code"
+                 inputmode="numeric" style="max-width:160px">
+          <button class="danger small" id="twofa-disable-btn">Disable 2FA</button>
+        </div>`;
+      document.getElementById("twofa-disable-btn").addEventListener("click", twofaDisable);
+    } else {
+      host.innerHTML = `
+        <div><span class="badge muted">disabled</span> Protect your account with an authenticator app.</div>
+        <button class="small" id="twofa-enroll-btn">Enable 2FA</button>
+        <div id="twofa-enroll" class="hidden flex-col" style="gap:8px; margin-top:6px"></div>`;
+      document.getElementById("twofa-enroll-btn").addEventListener("click", twofaEnroll);
+    }
+  }
+
+  async function twofaEnroll() {
+    const r = await api("/api/2fa/enroll", { method: "POST" });
+    if (!r.success) { toast(r.error, "danger"); return; }
+    const box = document.getElementById("twofa-enroll");
+    box.classList.remove("hidden");
+    box.innerHTML = `
+      <div class="small">Add this secret to your authenticator app (or paste the otpauth URI),
+        then enter a generated code to confirm:</div>
+      <div class="mono" style="user-select:all; word-break:break-all">${escapeHtml(r.data.secret)}</div>
+      <div class="tiny muted mono" style="user-select:all; word-break:break-all">${escapeHtml(r.data.otpauth_uri)}</div>
+      <div class="flex-row" style="gap:6px">
+        <input type="text" id="twofa-confirm-code" placeholder="6-digit code" inputmode="numeric" style="max-width:160px">
+        <button class="small" id="twofa-confirm-btn">Confirm &amp; Enable</button>
+      </div>`;
+    document.getElementById("twofa-confirm-btn").addEventListener("click", twofaConfirm);
+  }
+
+  async function twofaConfirm() {
+    const code = document.getElementById("twofa-confirm-code").value;
+    const r = await api("/api/2fa/confirm", { method: "POST", body: JSON.stringify({ code }) });
+    if (r.success) { toast("Two-factor authentication enabled.", "info"); load2fa(); }
+    else toast(r.error, "danger");
+  }
+
+  async function twofaDisable() {
+    const code = document.getElementById("twofa-disable-code").value;
+    const r = await api("/api/2fa/disable", { method: "POST", body: JSON.stringify({ code }) });
+    if (r.success) { toast("Two-factor authentication disabled.", "info"); load2fa(); }
+    else toast(r.error, "danger");
   }
 
   // ----- Home consumer API -----------------------------------------------

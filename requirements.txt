@@ -2,6 +2,7 @@ Flask>=3.0
 markdown>=3.5
 nh3>=0.2.15           # HTML sanitization of rendered markdown (XSS defense)
 cryptography>=42.0
+pyotp>=2.9             # optional per-user TOTP 2FA
 requests>=2.31
 defusedxml>=0.7        # safe XML parsing for Wazuh local_rules.xml
 waitress>=3.0         # production WSGI server (single process + thread pool)

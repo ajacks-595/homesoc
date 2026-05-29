@@ -14,8 +14,19 @@
         <span style="display:inline-block; width:10px; height:10px; border-radius:50%; background:var(--accent-secondary); box-shadow:0 0 6px var(--accent-secondary)"></span>
         HomeSOC
       </h1>
-      <p class="muted small">Sign in to continue.</p>
       {% if error %}<div class="banner danger">{{ error }}</div>{% endif %}
+      {% if totp %}
+      <p class="muted small">Enter the 6-digit code from your authenticator app.</p>
+      <form method="POST" action="/login/2fa" class="flex-col" style="gap:12px">
+        <input type="hidden" name="next" value="{{ next }}">
+        <div><label>Authentication code</label>
+          <input type="text" name="code" inputmode="numeric" autocomplete="one-time-code"
+                 pattern="[0-9 ]*" required autofocus style="width:100%"></div>
+        <button type="submit" style="width:100%">Verify</button>
+      </form>
+      <p class="muted small" style="margin-top:10px"><a href="/login">← Start over</a></p>
+      {% else %}
+      <p class="muted small">Sign in to continue.</p>
       <form method="POST" action="/login" class="flex-col" style="gap:12px">
         <input type="hidden" name="next" value="{{ next }}">
         <div><label>Username</label>
@@ -24,6 +35,7 @@
           <input type="password" name="password" required style="width:100%"></div>
         <button type="submit" style="width:100%">Sign in</button>
       </form>
+      {% endif %}
     </div>
   </main>
 </body>

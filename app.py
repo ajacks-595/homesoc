@@ -1497,7 +1497,46 @@ def me():
     u = auth.current_user()
     if not u:
         return err("not authenticated", 401)
-    return ok({"id": u["id"], "username": u["username"], "role": u["role"]})
+    return ok({"id": u["id"], "username": u["username"], "role": u["role"],
+               "totp_enabled": bool(u.get("totp_enabled"))})
+
+
+# ---------- 2FA (TOTP) ----------------------------------------------------
+
+@api_bp.route("/2fa/status")
+def twofa_status():
+    u = auth.current_user()
+    return ok({"enabled": bool(u and u.get("totp_enabled"))})
+
+
+@api_bp.route("/2fa/enroll", methods=["POST"])
+def twofa_enroll():
+    """Start enrollment: returns the secret + otpauth URI (2FA stays disabled
+    until a code is confirmed). Re-enroll overwrites any pending secret."""
+    u = auth.current_user()
+    data = auth.totp_begin_enroll(u)
+    auth.audit("user.2fa_enroll_start", "user", u["id"])
+    return ok(data)
+
+
+@api_bp.route("/2fa/confirm", methods=["POST"])
+def twofa_confirm():
+    u = auth.current_user()
+    p = request.get_json(silent=True) or {}
+    if auth.totp_confirm_enroll(u["id"], p.get("code") or ""):
+        auth.audit("user.2fa_enabled", "user", u["id"])
+        return ok({"enabled": True})
+    return err("invalid code — check your authenticator and try again")
+
+
+@api_bp.route("/2fa/disable", methods=["POST"])
+def twofa_disable():
+    u = auth.current_user()
+    p = request.get_json(silent=True) or {}
+    if auth.totp_disable(u["id"], p.get("code") or ""):
+        auth.audit("user.2fa_disabled", "user", u["id"])
+        return ok({"enabled": False})
+    return err("invalid code — a current code is required to disable 2FA")
 
 
 @api_bp.route("/ai/usage")
