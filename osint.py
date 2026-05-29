@@ -66,6 +66,17 @@ def _store(ioc: str, ioc_type: str, source: str, data: dict[str, Any]) -> None:
     db.osint_put(ioc, ioc_type, source, data, ttl_days=config.OSINT_CACHE_DAYS)
 
 
+def _parse_json(r, provider: str):
+    """Return (body, None) on success, or (None, error_dict) when a 200 body
+    isn't valid JSON (providers sometimes return WAF/captcha/gateway HTML).
+    requests.JSONDecodeError subclasses ValueError, so this catches both."""
+    try:
+        return r.json(), None
+    except ValueError:
+        return None, {"success": False,
+                      "error": f"invalid JSON from {provider} (HTTP {r.status_code})"}
+
+
 # ---------- VirusTotal ---------------------------------------------------
 
 def virustotal(ioc: str, *, force_refresh: bool = False) -> dict[str, Any]:
@@ -102,7 +113,9 @@ def virustotal(ioc: str, *, force_refresh: bool = False) -> dict[str, Any]:
     if r.status_code != 200:
         return {"success": False, "error": f"HTTP {r.status_code}: {r.text[:300]}"}
 
-    body = r.json()
+    body, jerr = _parse_json(r, "virustotal")
+    if jerr:
+        return jerr
     attrs = (body.get("data") or {}).get("attributes") or {}
     stats = attrs.get("last_analysis_stats") or {}
     summary = {
@@ -149,7 +162,10 @@ def abuseipdb(ioc: str, *, force_refresh: bool = False) -> dict[str, Any]:
     if r.status_code != 200:
         return {"success": False, "error": f"HTTP {r.status_code}: {r.text[:300]}"}
 
-    d = (r.json().get("data") or {})
+    body, jerr = _parse_json(r, "abuseipdb")
+    if jerr:
+        return jerr
+    d = (body.get("data") or {})
     summary = {
         "abuse_confidence":    d.get("abuseConfidenceScore", 0),
         "country_code":        d.get("countryCode"),
@@ -193,7 +209,9 @@ def urlscan(ioc: str, *, force_refresh: bool = False) -> dict[str, Any]:
     if r.status_code != 200:
         return {"success": False, "error": f"HTTP {r.status_code}: {r.text[:300]}"}
 
-    body = r.json()
+    body, jerr = _parse_json(r, "urlscan")
+    if jerr:
+        return jerr
     results = body.get("results", []) or []
     latest = results[0] if results else {}
     page = latest.get("page", {}) if latest else {}
