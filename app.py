@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -991,6 +992,13 @@ def home_pipeline():
     return ok(out)
 
 
+# Cap on concurrent SSE streams. Each stream is an infinite generator that pins
+# a waitress worker thread for its lifetime, so without a cap a few clients (or
+# stale browser tabs) could exhaust the pool and stall every other request.
+# Keep it below SOC_THREADS (default 8) so normal requests always have headroom.
+_sse_slots = threading.BoundedSemaphore(int(os.environ.get("SOC_SSE_MAX", "4")))
+
+
 @api_bp.route("/home/events")
 def home_events():
     """SSE feed for the home dashboard.
@@ -1012,7 +1020,7 @@ def home_events():
     from datetime import datetime as _dt
     from flask import Response as _Response, stream_with_context as _swc
 
-    def gen():
+    def _stream():
         # Snapshot baseline state on connect — we emit events for *changes*
         # relative to this. Avoids dumping the whole history at every
         # client reconnect.
@@ -1114,6 +1122,17 @@ def home_events():
             except Exception:  # noqa: BLE001
                 log.exception("home_events tick failed")
             _t.sleep(1.0)
+
+    # Refuse once the concurrent-stream cap is hit (returns immediately, no
+    # stream), so SSE clients can't starve the worker pool.
+    if not _sse_slots.acquire(blocking=False):
+        return err("too many concurrent event streams; retry shortly", 503)
+
+    def gen():
+        try:
+            yield from _stream()
+        finally:
+            _sse_slots.release()
 
     return _Response(_swc(gen()), mimetype="text/event-stream",
                      headers={
