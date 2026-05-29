@@ -15,6 +15,7 @@ import os
 import shutil
 import sqlite3
 import subprocess
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Iterator
@@ -79,10 +80,20 @@ def make_filename(kind: str) -> str:
     return f"soc-dashboard-{kind}-{stamp}.sqlite"
 
 
+def _secure_tmp() -> Path:
+    """A 0600 temp path for an on-disk snapshot. The snapshot is a full copy of
+    the DB (Fernet-encrypted secrets + session key), so it must not be written
+    to a predictable, world-readable /tmp name. mkstemp creates it owner-only;
+    sqlite reopens it by path."""
+    fd, path = tempfile.mkstemp(prefix="socbackup-", suffix=".sqlite")
+    os.close(fd)
+    return Path(path)
+
+
 def stream_to_browser(kind: str) -> tuple[bytes, str, int]:
     """Return (bytes, filename, size) ready for a Flask send_file response."""
     filename = make_filename(kind)
-    tmp = Path("/tmp") / filename
+    tmp = _secure_tmp()
     try:
         if kind == "config":
             size = snapshot_config(str(tmp))
@@ -107,7 +118,7 @@ def push_to_nas(kind: str, host: str, user: str, remote_path: str,
                 ssh_key: str | None = None) -> dict:
     """SCP a fresh snapshot to a remote host (e.g. Synology). Returns metadata."""
     filename = make_filename(kind)
-    tmp = Path("/tmp") / filename
+    tmp = _secure_tmp()
     ssh_key = ssh_key or config.SSH_KEY
     # NAS host/user/key are GUI-editable → validate before they hit the scp argv
     # (same argument-injection guard as the ssh wrappers).

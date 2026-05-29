@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta
@@ -312,6 +313,14 @@ def init_db() -> None:
         c.executescript(SCHEMA)
         _apply_migrations(c)
         _seed_host_config_for_upgrade(c)
+    # The DB holds Fernet-encrypted secrets + the signed-session key. Its key
+    # material (/etc/machine-id) is world-readable, so a local user able to read
+    # the DB file could derive those keys — keep the file (and WAL/SHM) owner-only.
+    for p in (DB_PATH, f"{DB_PATH}-wal", f"{DB_PATH}-shm"):
+        try:
+            os.chmod(p, 0o600)
+        except OSError:
+            pass
 
 
 # ---------- briefings ----------

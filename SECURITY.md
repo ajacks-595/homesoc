@@ -20,13 +20,22 @@ take longer — this is a personal project, not a funded one.
 **This dashboard is LAN-only by design.** Do not expose it to the public
 internet without putting a hardened reverse proxy in front of it.
 
-- All passwords hashed with PBKDF2-SHA256 (200,000 iterations) + per-user salt
+- All passwords hashed with PBKDF2-SHA256 (600,000 iterations, OWASP-2023) +
+  per-user salt; legacy lower-iteration hashes are upgraded on next login
 - All API keys, webhook URLs, NAS credentials encrypted at rest with Fernet,
   key derived from `/etc/machine-id` + a per-deployment salt via PBKDF2
+  (see "local host access" under Known limitations for the trust boundary)
+- Rendered markdown (briefings, AI explanations, chat) is HTML-sanitized with
+  nh3 server-side; the client escapes attribute contexts and allowlists URL
+  schemes (`http(s)`/`mailto`/same-origin only)
+- Outbound webhook URLs are SSRF-checked (loopback / link-local / cloud
+  metadata blocked; `SOC_WEBHOOK_ALLOW_PRIVATE=0` also blocks LAN ranges)
+- `/login` is rate-limited per IP + username, with a failed-login audit trail
 - Session cookies are HttpOnly + SameSite=Lax; `Secure` flag flipped on
   by setting `SOC_COOKIE_SECURE=1` (do this once you're behind TLS)
 - Every state-changing API endpoint records to the audit log
-- SSH commands use explicit argv lists; no `shell=True`
+- SSH commands use explicit argv lists (validated against argument injection);
+  no `shell=True`
 
 ## The home consumer API (`/api/home/*`)
 
@@ -80,10 +89,21 @@ disabled entirely, simply don't install `requirements-mcp.txt` / don't add the
 
 ## Known limitations
 
-- **No CSRF protection** — acceptable on single-user LAN; matters once you
-  expose this to multiple users. Add Flask-WTF or similar before opening up.
-- **No rate limiting on `/login`** — brute-force-able if exposed. Put it
-  behind a reverse proxy with rate limits, or add `flask-limiter`.
+- **No CSRF tokens** — state-changing requests are JSON over `fetch`, which
+  `SameSite=Lax` session cookies already shield from cross-site forgery in
+  practice. Add Flask-WTF before exposing the app to multiple users or a
+  public origin.
+- **Local host access — the encryption trust boundary.** The Fernet key is
+  derived from `/etc/machine-id`, which is world-readable. This protects an
+  *exfiltrated DB/backup taken to another host*, but NOT a local user on the
+  dashboard host: anyone who can read the DB file there can re-derive the key
+  (and thus the session secret and stored API keys). The DB and on-disk backup
+  snapshots are created `0600` to limit this, but shell access to the host
+  should be treated as equivalent to full compromise.
+- **The SSE stream accepts the home-API token as a `?token=` query param**
+  (EventSource cannot set headers). Query strings can land in proxy/access
+  logs — prefer the `X-HomeSOC-Token` header everywhere else, and rotate the
+  token if such a log is exposed.
 - **The session secret is regenerated only if you delete it from the
   settings table** — if leaked, rotate it manually.
 - **Per-machine encryption means data migration requires re-entering keys** —
