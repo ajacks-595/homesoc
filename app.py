@@ -1283,7 +1283,10 @@ def host_config_set():
                "ssh_key_path", "siem_scripts_dir", "claude_cli_path"}
     updates = {k: (v or "").strip() if isinstance(v, str) else v
                for k, v in p.items() if k in allowed}
-    config.host_config_set(updates)
+    try:
+        config.host_config_set(updates)
+    except ValueError as e:
+        return err(f"invalid host config: {e}")
     auth.audit("settings.host_config_update", "host_config", None,
                {"updated_keys": list(updates.keys())})
     return ok({"updated": list(updates.keys())})
@@ -1301,6 +1304,14 @@ def host_config_test():
               cmd: list[str] | None = None) -> dict:
         if not host:
             return {"configured": False, "reachable": False}
+        # Same argument-injection guard the real SSH paths use: host_config is
+        # operator-set but must never be parseable as an ssh option such as
+        # -oProxyCommand=... (this probe previously bypassed assert_safe_ssh).
+        try:
+            wazuh.assert_safe_ssh(host, user, key or config.SSH_KEY)
+        except ValueError as e:
+            return {"configured": True, "reachable": False,
+                    "stderr": ("refused unsafe SSH config: " + str(e))[:200]}
         import subprocess
         argv = ["ssh"]
         if key:

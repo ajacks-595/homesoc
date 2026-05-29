@@ -182,8 +182,13 @@ def host_config() -> dict:
 
 def host_config_set(values: dict) -> None:
     from database import setting_set
+    # Lazy import: wazuh imports config, so this can't be a module-level import.
+    from wazuh import assert_safe_host_config
     current = _read_host_config_from_db()
     current.update({k: v for k, v in values.items() if v is not None})
+    # Validate the merged result so SSH-injection-unsafe host/user/key values
+    # (e.g. -oProxyCommand=...) can never be persisted. Raises ValueError.
+    assert_safe_host_config(current)
     setting_set("host_config", encrypt(json.dumps(current)))
     invalidate_host_config()
 

@@ -43,6 +43,32 @@ def assert_safe_ssh(host: str, user: str, key: str) -> None:
     _safe_ssh(key, "key path", _SSH_KEY_RE)
 
 
+# host_config field name -> validating pattern, for the SSH-relevant fields that
+# end up as host/user/key in an ssh/scp argv. The command-path fields
+# (siem_scripts_dir, claude_cli_path, adguard_querylog_path) are remote command
+# tokens placed after "--", not ssh options, so they aren't argument-injection
+# vectors and are intentionally not pattern-checked here.
+_HOST_CONFIG_SSH_FIELDS = {
+    "wazuh_host":     _SSH_HOST_RE,
+    "claudedev_host": _SSH_HOST_RE,
+    "adguard_host":   _SSH_HOST_RE,
+    "wazuh_user":     _SSH_USER_RE,
+    "claudedev_user": _SSH_USER_RE,
+    "adguard_user":   _SSH_USER_RE,
+    "ssh_key_path":   _SSH_KEY_RE,
+}
+
+
+def assert_safe_host_config(cfg: dict) -> None:
+    """Validate the SSH-relevant fields of a host_config blob so injection-unsafe
+    values (e.g. a host of '-oProxyCommand=...') can never be stored. Empty
+    values are allowed (they mean 'unset / use default'). Raises ValueError."""
+    for field, pattern in _HOST_CONFIG_SSH_FIELDS.items():
+        val = cfg.get(field)
+        if val:   # only non-empty values are constrained
+            _safe_ssh(val, field, pattern)
+
+
 def _ssh_argv(host: str, user: str, remote_cmd: list[str], *,
               key: str | None = None) -> list[str]:
     key = key or config.SSH_KEY
