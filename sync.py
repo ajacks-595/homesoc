@@ -1,6 +1,7 @@
 """High-level sync jobs: briefings → DB, Wazuh alerts → DB, AdGuard → DB."""
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os as _os
@@ -385,6 +386,9 @@ _POLL_AGENTS_S    = int(_os.environ.get("SOC_POLL_AGENTS_S",    "900"))    # 15 
 _POLL_BRIEFINGS_S = int(_os.environ.get("SOC_POLL_BRIEFINGS_S", "3600"))   # 1 hour
 
 _pollers_started = False
+# Guards _poller_state (written by 4 poller threads, read by the Flask
+# /pollers/status handler) and the _pollers_started check-and-set.
+_poller_lock = threading.Lock()
 _poller_state: dict[str, dict[str, object]] = {
     "alerts":    {"last_run": None, "last_result": None, "last_error": None},
     "dns":       {"last_run": None, "last_result": None, "last_error": None},
@@ -398,21 +402,25 @@ def _poller_loop(name: str, interval_s: int, fn) -> None:
     while True:
         try:
             res = fn()
-            _poller_state[name]["last_result"] = res
-            _poller_state[name]["last_error"] = None
+            with _poller_lock:
+                _poller_state[name]["last_result"] = res
+                _poller_state[name]["last_error"] = None
         except Exception as e:  # noqa: BLE001
             log.exception("poller %s failed", name)
-            _poller_state[name]["last_error"] = str(e)
-        _poller_state[name]["last_run"] = datetime.utcnow().isoformat(timespec="seconds")
+            with _poller_lock:
+                _poller_state[name]["last_error"] = str(e)
+        with _poller_lock:
+            _poller_state[name]["last_run"] = datetime.utcnow().isoformat(timespec="seconds")
         time.sleep(interval_s)
 
 
 def start_background_pollers() -> None:
     """Idempotent: kick off background polling threads. Safe to call once at app start."""
     global _pollers_started
-    if _pollers_started:
-        return
-    _pollers_started = True
+    with _poller_lock:
+        if _pollers_started:
+            return
+        _pollers_started = True
 
     # Background worker that drains AI-enrichment + delivery off the poller path.
     _start_dispatch_worker()
@@ -433,13 +441,15 @@ def start_background_pollers() -> None:
 
 
 def poller_status() -> dict[str, object]:
+    with _poller_lock:
+        state = copy.deepcopy(_poller_state)
     return {
         "running":    _pollers_started,
         "intervals":  {"alerts_s":    _POLL_ALERTS_S,
                        "dns_s":       _POLL_DNS_S,
                        "agents_s":    _POLL_AGENTS_S,
                        "briefings_s": _POLL_BRIEFINGS_S},
-        "state":      _poller_state,
+        "state":      state,
     }
 
 
