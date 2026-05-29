@@ -3,6 +3,19 @@
 Nothing here is blocking — the app works as built. These are tracked for the
 next dev session.
 
+## Recently shipped (review / hardening pass)
+- Security: server-side HTML sanitization (nh3) + attribute-safe client
+  escaping + URL-scheme allowlisting; SSRF guard on webhook delivery;
+  host_config SSH argument-injection guard; numeric rule_id (XML-injection)
+  guard; login rate-limiting + audit; PBKDF2 → 600k with rehash-on-login;
+  optional per-user TOTP 2FA; CSP `script-src` nonce-gated (no `unsafe-inline`);
+  0600 DB + secure backup tempfiles.
+- Performance: `alerts(status, timestamp)` index; cached Fernet key; SSE
+  concurrency cap; streamed single-pass AdGuard aggregation; N+1 → single
+  UPDATE; OSINT-cache reaper.
+- Features: related-activity panel, MITRE ATT&CK summary + filter, noisy-rule
+  detector, retention poller, SOC performance (MTTR/FP) tile, briefing export.
+
 ## Quick wins
 - [ ] First-run bootstrap doesn't call `sync_agent_status()`, so the Hosts
       page shows "Active Agents: 0" until you click "Refresh agent status"
@@ -22,22 +35,24 @@ next dev session.
       thread pool, so in-process pollers still start once). `app.py` prefers
       waitress automatically; no `ExecStart` change needed. `SOC_DEV_SERVER=1`
       forces the Werkzeug reloader for local dev.
-- [ ] Schedule a periodic background sync (alerts every 30s, DNS hourly,
-      agent status every 5min) using `apscheduler` or a simple thread. Right
-      now everything is poll-on-request.
-- [ ] The alert detail expand row builds raw_json HTML via `JSON.stringify`
-      then `linkifyIps` runs on the resulting HTML — works but means we
-      linkify inside quoted strings too. Switch to a real syntax-highlighted
-      JSON viewer (e.g. a tiny ~50-line recursive renderer).
-- [ ] DNS sync on prod takes ~7s because we pipe 60MB of querylog over SSH.
-      Cache the last-known offset and `tail -c +<offset>` for incremental.
+- [x] Background pollers (alerts 5min / DNS hourly / agents 15min / briefings
+      hourly / retention daily) run in-process, or via systemd timers with
+      `SOC_POLLERS=systemd`. AI enrichment is off the poller's critical path
+      (a background dispatch worker).
+- [x] The alert-detail linkify no longer round-trips innerHTML —
+      `linkifyIpsInEl` walks text nodes (added with the XSS hardening). A
+      syntax-highlighted JSON viewer would still be a nice upgrade.
+- [ ] DNS sync still pipes the querylog tail over SSH (the slow part). The
+      parse/aggregate is now single-pass + streamed; a remote `tail -c +<offset>`
+      (needs a runtipi sudoers entry) would cut the transfer.
 
 ## Bigger
-- [ ] **Auth layer** — even just a single shared password via a reverse proxy.
-      Right now anyone on the LAN can change Wazuh rules.
-- [ ] **CSRF protection** on mutating POST/PATCH/DELETE endpoints. Flask
-      doesn't add this by default and we don't have it. Acceptable on a
-      single-user LAN box, not acceptable for any wider deployment.
+- [x] **Auth layer** — per-user PBKDF2 (600k) login with sessions, brute-force
+      throttling, optional TOTP 2FA, and a full audit log. Rule changes are
+      authenticated + audited.
+- [ ] **CSRF tokens** on mutating endpoints. Mitigated in practice today by
+      `SameSite=Lax` cookies + JSON-only `fetch`; add Flask-WTF before exposing
+      to multiple users / a public origin.
 - [ ] **Multi-host hosts page** — current schema assumes one Wazuh manager.
       Generalise.
 - [ ] **Briefing actions** would benefit from being editable in the UI

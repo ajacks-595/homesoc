@@ -868,22 +868,32 @@ Tracked in `ROADMAP.md`. Headline items:
 - **Roles** — schema supports a `role` column; only the flat single-role
   mode is currently used. Per-user RBAC (read-only vs admin) would be one
   middleware addition + a few endpoint annotations
-- **CSRF protection** — not protected. Acceptable on LAN-only single-user;
-  matters once exposed via reverse proxy
+- **CSRF protection** — no tokens. Mitigated in practice by `SameSite=Lax`
+  session cookies + JSON-only `fetch`; add Flask-WTF before exposing via a
+  reverse proxy to multiple users
 - **Screenshots** — README references `docs/screenshot-placeholder.png` which
   doesn't exist. Adding them is a 5-minute polish item but currently shows a
   broken image on the GitHub repo page
 - **Incident records / case grouping** — flagged as the most differentiating
   next feature; would group multiple related alerts into a tracked
-  investigation with an AI summary
+  investigation with an AI summary. (A non-AI per-alert IOC correlation panel
+  now exists — see `ai.related_observations` / `/api/alerts/<id>/related`.)
 - **Per-(rule, agent) "expected behaviour" notes** — analyst quality-of-life
   win: persistent notes attached to a rule+agent pair shown inline next to
   matching alerts
-- **WSGI in front of Flask** — currently runs Flask's dev server. `waitress`
-  or `gunicorn` would be more correct for "production"
-- **PBKDF2 iteration count is 200k** — below the OWASP-2023 minimum of 600k.
-  Flagged by the new `Repo Review` spec; raising would invalidate all
-  existing password hashes, so deferred until a planned credential reset.
+
+### Resolved during the review/hardening pass
+- **WSGI** — served via `waitress` (auto-selected in `app.py`; `SOC_DEV_SERVER=1`
+  forces the Werkzeug reloader for local dev).
+- **PBKDF2** — raised to 600k (OWASP-2023) with transparent rehash-on-login, so
+  no existing hashes were invalidated (`auth.needs_rehash`).
+- **2FA** — optional per-user TOTP (`pyotp`); two-step login + Settings enrollment.
+- **CSP** — `script-src` is nonce-gated (no `'unsafe-inline'`); inline handlers
+  moved to a `data-act` delegation. Rendered markdown is nh3-sanitized.
+- **SSRF / SSH-injection / XML-injection** guards added on webhook delivery,
+  host_config test, and FP rule_id respectively. Login is rate-limited.
+- **Perf** — `idx_alerts_status_ts`, cached Fernet key, SSE concurrency cap,
+  streamed single-pass AdGuard aggregation, retention/housekeeping poller.
 
 ## Quick reference
 
