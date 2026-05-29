@@ -597,6 +597,8 @@ def fp_preview():
     desc = (p.get("description") or "").strip()
     if not rid or not desc:
         return err("rule_id and description required")
+    if not rid.isdigit():
+        return err("rule_id must be numeric")
     try:
         xml = wazuh.read_local_rules()
     except Exception as e:  # noqa: BLE001
@@ -614,6 +616,8 @@ def fp_add():
     desc = (p.get("description") or "").strip()
     if not rid or not desc:
         return err("rule_id and description required")
+    if not rid.isdigit():
+        return err("rule_id must be numeric")
 
     try:
         original = wazuh.read_local_rules()

@@ -373,6 +373,8 @@ def add_suppression(rule_id: str, description: str, agent_name: str | None = Non
     agent = (agent_name or "").strip() or None
     if not rid or not desc:
         return _error("rule_id and description are required")
+    if not rid.isdigit():
+        return _error("rule_id must be numeric")
 
     try:
         original = wazuh.read_local_rules()

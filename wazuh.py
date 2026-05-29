@@ -276,6 +276,14 @@ def next_local_rule_id(existing_xml: str) -> str:
 def build_suppression(parent_rule_id: str, agent_name: str | None,
                       description: str, new_rule_id: str) -> str:
     """Return an XML snippet that suppresses parent_rule_id (optionally scoped to agent)."""
+    # parent_rule_id and new_rule_id are interpolated into the XML unescaped, so
+    # they MUST be plain integers (a Wazuh <if_sid>/rule id always is). This is
+    # the hard guard against XML injection through a crafted rule_id; callers
+    # should also validate up front for a friendlier error.
+    if not str(parent_rule_id or "").isdigit():
+        raise ValueError(f"parent_rule_id must be numeric, got {parent_rule_id!r}")
+    if not str(new_rule_id or "").isdigit():
+        raise ValueError(f"new_rule_id must be numeric, got {new_rule_id!r}")
     safe_desc = (description or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     if agent_name:
         safe_agent = agent_name.replace('"', "&quot;")
