@@ -285,17 +285,14 @@ def _fetch_adguard_tail(max_bytes: int = 60 * 1024 * 1024) -> str:
     The file is millions of lines; we cap to the last ~60 MB which is plenty
     for the most recent day or two of queries.
     """
-    if config.IS_DEV:
-        # In dev we can SSH to runtipi directly using collector_key.
-        cp = wazuh.run_on_runtipi(
-            ["sudo", "-n", "/usr/bin/cat", config.ADGUARD_QUERYLOG],
-            timeout=60,
-        )
-    else:
-        cp = wazuh.run_on_runtipi(
-            ["sudo", "-n", "/usr/bin/cat", config.ADGUARD_QUERYLOG],
-            timeout=60,
-        )
+    # dev and prod both SSH to runtipi and cat the querylog (the wrapper does a
+    # local exec when runtipi is this host). TODO: a remote `tail -c` would ship
+    # only the window instead of the whole file, but needs a sudoers entry for
+    # tail on runtipi — deferred (see gotcha #3).
+    cp = wazuh.run_on_runtipi(
+        ["sudo", "-n", "/usr/bin/cat", config.ADGUARD_QUERYLOG],
+        timeout=60,
+    )
     if cp.returncode != 0:
         raise RuntimeError(
             f"adguard cat failed: {cp.stderr.decode(errors='replace')[:300]}")
@@ -379,7 +376,6 @@ def first_run_bootstrap() -> dict[str, object]:
 # ---------- background pollers --------------------------------------------
 
 # Intervals in seconds. Override with env vars for tuning.
-import os as _os
 _POLL_ALERTS_S    = int(_os.environ.get("SOC_POLL_ALERTS_S",    "300"))    # 5 min
 _POLL_DNS_S       = int(_os.environ.get("SOC_POLL_DNS_S",       "3600"))   # 1 hour
 _POLL_AGENTS_S    = int(_os.environ.get("SOC_POLL_AGENTS_S",    "900"))    # 15 min

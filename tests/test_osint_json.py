@@ -47,3 +47,24 @@ def test_virustotal_valid_json_still_parses(tmp_db, monkeypatch):
     r = osint.virustotal("8.8.8.8", force_refresh=True)
     assert r["success"] is True
     assert r["data"]["malicious"] == 1
+
+
+def _urlscan_payload(malicious):
+    return {"total": 1, "results": [{
+        "page": {}, "task": {},
+        "verdicts": {"overall": {"malicious": malicious, "score": 80}},
+        "result": "https://urlscan.io/result/x"}]}
+
+
+def test_urlscan_verdict_malicious(tmp_db, monkeypatch):
+    _force_key(monkeypatch)
+    monkeypatch.setattr(osint.requests, "get", lambda *a, **k: _Resp(payload=_urlscan_payload(True)))
+    r = osint.urlscan("evil.example", force_refresh=True)
+    assert r["success"] and r["data"]["verdict"] == "malicious"
+
+
+def test_urlscan_verdict_clean(tmp_db, monkeypatch):
+    _force_key(monkeypatch)
+    monkeypatch.setattr(osint.requests, "get", lambda *a, **k: _Resp(payload=_urlscan_payload(False)))
+    r = osint.urlscan("ok.example", force_refresh=True)
+    assert r["success"] and r["data"]["verdict"] == "clean"

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 from contextlib import contextmanager
@@ -10,6 +11,8 @@ from pathlib import Path
 from typing import Any, Iterable, Iterator
 
 from config import DB_PATH
+
+log = logging.getLogger("soc.database")
 
 
 SCHEMA = """
@@ -237,7 +240,12 @@ CREATE INDEX IF NOT EXISTS idx_pipeline_kind_ts ON pipeline_runs(kind, started_a
 
 @contextmanager
 def conn() -> Iterator[sqlite3.Connection]:
-    """Yield a connection that auto-commits on success, rolls back on error, always closes."""
+    """Yield a SQLite connection (WAL mode) and always close it.
+
+    NOTE: isolation_level=None means each statement autocommits immediately —
+    there is NO implicit transaction or rollback. Multi-statement helpers are
+    therefore not atomic; if a sequence must be all-or-nothing, wrap it in an
+    explicit BEGIN/COMMIT/ROLLBACK yourself."""
     Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
     c = sqlite3.connect(DB_PATH, timeout=10, isolation_level=None)
     c.row_factory = sqlite3.Row
@@ -300,12 +308,16 @@ def _seed_host_config_for_upgrade(c: sqlite3.Connection) -> None:
         }.items() if v
     }
     if seeded:
-        c.execute(
-            """INSERT INTO settings(key, value_encrypted)
-               VALUES('host_config', ?)
-               ON CONFLICT(key) DO UPDATE SET value_encrypted=excluded.value_encrypted""",
-            (encrypt(json.dumps(seeded)),),
-        )
+        try:
+            c.execute(
+                """INSERT INTO settings(key, value_encrypted)
+                   VALUES('host_config', ?)
+                   ON CONFLICT(key) DO UPDATE SET value_encrypted=excluded.value_encrypted""",
+                (encrypt(json.dumps(seeded)),),
+            )
+        except Exception:  # noqa: BLE001 — never let an upgrade-seed hiccup abort startup
+            log.warning("host_config upgrade-seed skipped (encrypt/machine-id issue?)",
+                        exc_info=True)
 
 
 def init_db() -> None:

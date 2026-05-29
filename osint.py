@@ -220,7 +220,7 @@ def urlscan(ioc: str, *, force_refresh: bool = False) -> dict[str, Any]:
     summary = {
         "found":         bool(results),
         "result_count":  body.get("total", 0),
-        "verdict":       verdicts.get("malicious", False) and "malicious" or "clean",
+        "verdict":       "malicious" if verdicts.get("malicious") else "clean",
         "score":         verdicts.get("score"),
         "categories":    verdicts.get("categories", []),
         "scan_date":     task.get("time"),
