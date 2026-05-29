@@ -7,7 +7,7 @@
   <h1>Briefings</h1>
   <div class="flex-row">
     <input type="search" id="b-search" placeholder="Search all briefings…" style="min-width:280px">
-    <button class="secondary" onclick="SOC.syncBriefings()">↻ Sync</button>
+    <button class="secondary" data-act="syncBriefings">↻ Sync</button>
   </div>
 </div>
 
@@ -37,5 +37,5 @@
 {% endblock %}
 
 {% block scripts %}
-<script>SOC.initBriefings();</script>
+<script nonce="{{ csp_nonce }}">SOC.initBriefings();</script>
 {% endblock %}

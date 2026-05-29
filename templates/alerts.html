@@ -6,9 +6,9 @@
 <div class="flex-row" style="justify-content:space-between; margin-bottom:14px">
   <h1>Alert Explorer <span class="badge accent" id="alert-count-badge">—</span></h1>
   <div class="flex-row">
-    <button class="danger" onclick="SOC.alertsPreset('critical')">⚠ Critical ≥ 10</button>
-    <button class="warn" onclick="SOC.alertsPreset('high')">High ≥ 7</button>
-    <button class="ghost" onclick="SOC.alertsPreset('all')">All</button>
+    <button class="danger" data-act="alertsPreset" data-arg="critical">⚠ Critical ≥ 10</button>
+    <button class="warn" data-act="alertsPreset" data-arg="high">High ≥ 7</button>
+    <button class="ghost" data-act="alertsPreset" data-arg="all">All</button>
     <select id="f-status" style="margin-left:8px">
       <option value="open" selected>Open only</option>
       <option value="open,in_progress">Open + In Progress</option>
@@ -18,8 +18,8 @@
       <option value="acknowledged">Acknowledged</option>
       <option value="in_progress">In Progress</option>
     </select>
-    <button class="secondary" onclick="SOC.exportAlerts()">⬇ Export CSV</button>
-    <button class="secondary" onclick="SOC.syncAlerts()">↻ Sync from Wazuh</button>
+    <button class="secondary" data-act="exportAlerts">⬇ Export CSV</button>
+    <button class="secondary" data-act="syncAlerts">↻ Sync from Wazuh</button>
   </div>
 </div>
 
@@ -43,8 +43,8 @@
     <label>Search</label>
     <input type="search" id="f-q" placeholder="full text…">
   </div>
-  <button onclick="SOC.applyAlertFilters()">Apply</button>
-  <button class="ghost" onclick="SOC.clearAlertFilters()">Clear</button>
+  <button data-act="applyAlertFilters">Apply</button>
+  <button class="ghost" data-act="clearAlertFilters">Clear</button>
 </div>
 
 <div class="card" style="padding:0">
@@ -65,12 +65,12 @@
 </div>
 
 <div class="pagination">
-  <button class="secondary" onclick="SOC.alertsPage(-1)">‹ Prev</button>
+  <button class="secondary" data-act="alertsPage" data-arg="-1">‹ Prev</button>
   <span class="info" id="alerts-page-info">page 1</span>
-  <button class="secondary" onclick="SOC.alertsPage(1)">Next ›</button>
+  <button class="secondary" data-act="alertsPage" data-arg="1">Next ›</button>
 </div>
 {% endblock %}
 
 {% block scripts %}
-<script>SOC.initAlerts();</script>
+<script nonce="{{ csp_nonce }}">SOC.initAlerts();</script>
 {% endblock %}

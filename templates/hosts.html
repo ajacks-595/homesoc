@@ -6,8 +6,8 @@
 <div class="flex-row" style="justify-content:space-between; margin-bottom:14px">
   <h1>Host Inventory</h1>
   <div class="flex-row">
-    <button class="secondary" onclick="SOC.hostsRefresh()">↻ Refresh agent status</button>
-    <button onclick="SOC.hostsOpenAdd()">+ Add Host</button>
+    <button class="secondary" data-act="hostsRefresh">↻ Refresh agent status</button>
+    <button data-act="hostsOpenAdd">+ Add Host</button>
   </div>
 </div>
 
@@ -30,5 +30,5 @@
 {% endblock %}
 
 {% block scripts %}
-<script>SOC.initHosts();</script>
+<script nonce="{{ csp_nonce }}">SOC.initHosts();</script>
 {% endblock %}

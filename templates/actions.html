@@ -11,7 +11,7 @@
     </select>
     <input type="date" id="a-from">
     <input type="date" id="a-to">
-    <button class="secondary" onclick="SOC.actionsLoad()">Apply</button>
+    <button class="secondary" data-act="actionsLoad">Apply</button>
   </div>
 </div>
 
@@ -39,5 +39,5 @@
 {% endblock %}
 
 {% block scripts %}
-<script>SOC.initActions();</script>
+<script nonce="{{ csp_nonce }}">SOC.initActions();</script>
 {% endblock %}

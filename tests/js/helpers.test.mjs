@@ -10,11 +10,11 @@ import assert from "node:assert/strict";
 const srcPath = new URL("../../static/js/main.js", import.meta.url);
 let src = fs.readFileSync(srcPath, "utf8");
 
-const marker = "  // ===== expose";
-assert.ok(src.includes(marker), "expose marker not found — did main.js change?");
+const ret = "  return PUBLIC;";
+assert.ok(src.includes(ret), "return PUBLIC not found — did main.js change?");
 src = src.replace(
-  marker,
-  "  globalThis.__h = { escapeHtml, safeUrl, linkifyIpsInEl, parseUtc, ageHours };\n" + marker,
+  ret,
+  "  globalThis.__h = { escapeHtml, safeUrl, linkifyIpsInEl, parseUtc, ageHours, PUBLIC };\n" + ret,
 );
 
 // ---- minimal DOM shim (enough for el() + linkifyIpsInEl) ------------------
@@ -62,6 +62,10 @@ const document = {
   createTextNode: v => new TextNode(v),
   createDocumentFragment: () => new Frag(),
   createTreeWalker,
+  // SOC registers delegated click/submit handlers at load — capture them so the
+  // delegation can be exercised with synthetic events.
+  _listeners: {},
+  addEventListener(type, fn) { this._listeners[type] = fn; },
 };
 
 const sandbox = { document, NodeFilter, window: {}, console,
@@ -69,7 +73,9 @@ const sandbox = { document, NodeFilter, window: {}, console,
   URLSearchParams, setTimeout, Chart: function () {}, navigator: {} };
 vm.createContext(sandbox);
 vm.runInContext(src, sandbox);
-const { escapeHtml, safeUrl, linkifyIpsInEl, parseUtc, ageHours } = sandbox.__h;
+const { escapeHtml, safeUrl, linkifyIpsInEl, parseUtc, ageHours, PUBLIC } = sandbox.__h;
+const _click = document._listeners.click;
+const _submit = document._listeners.submit;
 
 let failures = 0;
 function check(name, fn) {
@@ -148,6 +154,39 @@ check("ageHours handles Z / no-suffix / +00:00 without NaN", () => {
 check("parseUtc treats a bare (no-zone) stamp as UTC", () => {
   assert.equal(parseUtc("2026-05-29T10:00:00").getTime(),
                Date.UTC(2026, 4, 29, 10, 0, 0));
+});
+
+// ---- data-act delegation (F7: CSP-safe inline-handler replacement) --------
+function fireClick(act, arg, tagName = "BUTTON") {
+  const el = { dataset: arg === undefined ? { act } : { act, arg }, tagName };
+  _click({ target: { closest: () => el }, preventDefault() {} });
+}
+check("click delegation coerces a numeric data-arg to a Number", () => {
+  const orig = PUBLIC.calNav; let got = "UNSET";
+  PUBLIC.calNav = (a) => { got = a; };
+  try { fireClick("calNav", "-1"); assert.strictEqual(got, -1); }
+  finally { PUBLIC.calNav = orig; }
+});
+check("click delegation passes a non-numeric data-arg through as a string", () => {
+  const orig = PUBLIC.pipelineRun; let got;
+  PUBLIC.pipelineRun = (a) => { got = a; };
+  try { fireClick("pipelineRun", "weekly"); assert.strictEqual(got, "weekly"); }
+  finally { PUBLIC.pipelineRun = orig; }
+});
+check("click delegation skips <form> (submit handles it)", () => {
+  const orig = PUBLIC.quickOsint; let n = 0;
+  PUBLIC.quickOsint = () => { n += 1; };
+  try {
+    const form = { dataset: { act: "quickOsint" }, tagName: "FORM" };
+    _click({ target: { closest: () => form }, preventDefault() {} });
+    assert.strictEqual(n, 0);                         // click skips forms
+    _submit({ target: { closest: () => form }, preventDefault() {} });
+    assert.strictEqual(n, 1);                         // submit dispatches
+  } finally { PUBLIC.quickOsint = orig; }
+});
+check("click delegation ignores unknown / absent data-act", () => {
+  // no [data-act] ancestor → closest returns null → no throw
+  _click({ target: { closest: () => null }, preventDefault() {} });
 });
 
 if (failures) { console.error(`\n${failures} JS helper assertion(s) failed`); process.exit(1); }

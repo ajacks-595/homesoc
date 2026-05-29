@@ -331,7 +331,7 @@ const SOC = (() => {
     // Click the agent name → filter explorer to that agent.
     div.innerHTML =
       `<span class="ts">${fmt.ts(a.timestamp)}</span>
-       <a class="agent" href="/alerts?agent=${encodeURIComponent(a.agent_name || "")}" onclick="event.stopPropagation()">${agent}</a>
+       <a class="agent" href="/alerts?agent=${encodeURIComponent(a.agent_name || "")}">${agent}</a>
        <span class="level">${a.rule_level}</span>
        <span class="desc">${desc}
          <span class="muted tiny"> · rule ${escapeHtml(a.rule_id)}</span></span>`;
@@ -579,9 +579,9 @@ const SOC = (() => {
 
     let html = `
       <div class="calendar-header">
-        <button class="ghost small" onclick="SOC.calNav(-1)">◀</button>
+        <button class="ghost small" data-act="calNav" data-arg="-1">◀</button>
         <strong>${calMonth}</strong>
-        <button class="ghost small" onclick="SOC.calNav(1)">▶</button>
+        <button class="ghost small" data-act="calNav" data-arg="1">▶</button>
       </div>
       <div class="calendar">`;
     ["M","T","W","T","F","S","S"].forEach(d => html += `<div class="dow">${d}</div>`);
@@ -1361,8 +1361,8 @@ const SOC = (() => {
         </div>
       </div>
       <div class="actions">
-        <button class="ghost" onclick="SOC.closeModal()">Cancel</button>
-        <button onclick="SOC.fpSubmit()">Apply & Restart Wazuh</button>
+        <button class="ghost" data-act="closeModal">Cancel</button>
+        <button data-act="fpSubmit">Apply & Restart Wazuh</button>
       </div>`;
     openModal(html, { onMount: () => {
       // populate agents
@@ -1560,8 +1560,8 @@ const SOC = (() => {
       <label>Resolution notes</label>
       <textarea id="a-notes">${escapeHtml(a.resolution_notes || "")}</textarea>
       <div class="actions">
-        <button class="ghost" onclick="SOC.closeModal()">Close</button>
-        <button onclick="SOC.actionResolve(${a.id})">Mark Resolved</button>
+        <button class="ghost" data-act="closeModal">Close</button>
+        <button data-act="actionResolve" data-arg="${a.id}">Mark Resolved</button>
       </div>
     `);
   }
@@ -1653,8 +1653,8 @@ const SOC = (() => {
         <div><label>Notes</label><textarea id="h-notes"></textarea></div>
       </div>
       <div class="actions">
-        <button class="ghost" onclick="SOC.closeModal()">Cancel</button>
-        <button onclick="SOC.hostsSubmit()">Save</button>
+        <button class="ghost" data-act="closeModal">Cancel</button>
+        <button data-act="hostsSubmit">Save</button>
       </div>
     `);
   }
@@ -2104,8 +2104,8 @@ const SOC = (() => {
         </div>
       </div>
       <div class="actions">
-        <button class="ghost" onclick="SOC.closeModal()">Cancel</button>
-        <button onclick="SOC.userSubmit()">Create</button>
+        <button class="ghost" data-act="closeModal">Cancel</button>
+        <button data-act="userSubmit">Create</button>
       </div>
     `);
   }
@@ -2293,8 +2293,8 @@ const SOC = (() => {
         <label><input type="checkbox" id="wh-ai" checked> Include AI explanation in payload (when available)</label>
       </div>
       <div class="actions">
-        <button class="ghost" onclick="SOC.closeModal()">Cancel</button>
-        <button onclick="SOC.webhookSubmit()">Save</button>
+        <button class="ghost" data-act="closeModal">Cancel</button>
+        <button data-act="webhookSubmit">Save</button>
       </div>
     `);
   }
@@ -2420,7 +2420,7 @@ const SOC = (() => {
 
   // ===== expose =============================================================
 
-  return {
+  const PUBLIC = {
     initDashboard, initBriefings, initAlerts, initOsint, initFp, initActions,
     initHosts, initThreatIntel, initSettings,
     // dashboard
@@ -2449,4 +2449,28 @@ const SOC = (() => {
     // generic
     closeModal, closeSidePanel,
   };
+
+  // ---- delegated event handlers (CSP-safe replacement for inline on*) ------
+  // Buttons/forms declare data-act="<publicFn>" (+ optional data-arg). Works for
+  // both server-rendered markup and JS-built modal HTML (events bubble to
+  // document). A numeric data-arg is coerced to a Number; with no data-arg the
+  // handler receives the event.
+  function _dispatch(el, ev) {
+    const fn = PUBLIC[el.dataset.act];
+    if (typeof fn !== "function") return;
+    ev.preventDefault();
+    let arg = el.dataset.arg;
+    if (arg !== undefined && /^-?\d+$/.test(arg)) arg = Number(arg);
+    fn(arg === undefined ? ev : arg);
+  }
+  document.addEventListener("click", (e) => {
+    const el = e.target.closest && e.target.closest("[data-act]");
+    if (el && el.tagName !== "FORM") _dispatch(el, e);
+  });
+  document.addEventListener("submit", (e) => {
+    const f = e.target.closest && e.target.closest("form[data-act]");
+    if (f) _dispatch(f, e);
+  });
+
+  return PUBLIC;
 })();

@@ -14,7 +14,7 @@ from pathlib import Path
 import markdown as md_lib
 import nh3
 from flask import (
-    Blueprint, Flask, abort, jsonify, render_template, request, send_file,
+    Blueprint, Flask, abort, g, jsonify, render_template, request, send_file,
 )
 
 import ai
@@ -1676,6 +1676,14 @@ def create_app() -> Flask:
     app.register_blueprint(api_bp)
 
     @app.before_request
+    def _csp_nonce():
+        # Per-request nonce for inline <script> blocks, so the CSP can drop
+        # 'unsafe-inline' from script-src (a real XSS backstop). Set before the
+        # auth middleware so it's available even on redirect/error responses.
+        import secrets as _secrets
+        g.csp_nonce = _secrets.token_urlsafe(16)
+
+    @app.before_request
     def _enforce_auth():
         # Make every session permanent so the 30-day lifetime applies
         from flask import session as _s
@@ -1692,13 +1700,16 @@ def create_app() -> Flask:
         resp.headers.setdefault("Referrer-Policy", "no-referrer")
         resp.headers.setdefault("Permissions-Policy",
                                 "geolocation=(), microphone=(), camera=()")
-        # CSP: self-only. Inline scripts/styles are used throughout the
-        # templates, so 'unsafe-inline' is required until those are refactored
-        # out. Still blocks external script/object loads and framing.
+        # CSP: inline <script> is nonce-gated (no 'unsafe-inline' for scripts),
+        # which makes the policy a genuine XSS backstop. style-src keeps
+        # 'unsafe-inline' because the templates use inline style="" attributes
+        # (which CSP nonces cannot cover and which can't execute script anyway).
+        nonce = getattr(g, "csp_nonce", "")
+        script_src = f"script-src 'self' 'nonce-{nonce}'" if nonce else "script-src 'self'"
         resp.headers.setdefault(
             "Content-Security-Policy",
             "default-src 'self'; "
-            "script-src 'self' 'unsafe-inline'; "
+            + script_src + "; "
             "style-src 'self' 'unsafe-inline'; "
             "img-src 'self' data: https:; "
             "object-src 'none'; "
@@ -1709,10 +1720,11 @@ def create_app() -> Flask:
                 "Strict-Transport-Security", "max-age=31536000; includeSubDomains")
         return resp
 
-    # Expose current user to all templates (used in nav for the user menu)
+    # Expose current user + CSP nonce to all templates.
     @app.context_processor
     def _inject_user():
-        return {"current_user": auth.current_user()}
+        return {"current_user": auth.current_user(),
+                "csp_nonce": getattr(g, "csp_nonce", "")}
 
     @app.errorhandler(BadParam)
     def _bad_param(e):

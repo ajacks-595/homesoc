@@ -6,7 +6,7 @@
   <title>{% block title %}HomeSOC{% endblock %}</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/themes.css') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}">
-  <script>
+  <script nonce="{{ csp_nonce }}">
     // Apply persisted theme before paint to avoid FOUC
     (function() {
       var t = localStorage.getItem('soc-theme') || '{{ theme }}';
@@ -64,7 +64,7 @@
   </main>
 
   <div id="side-panel" class="side-panel">
-    <button class="close ghost small" onclick="SOC.closeSidePanel()">×</button>
+    <button class="close ghost small" data-act="closeSidePanel">×</button>
     <div id="side-panel-content"></div>
   </div>
 
@@ -75,7 +75,7 @@
   <script src="{{ url_for('static', filename='js/main.js') }}"></script>
   {% block scripts %}{% endblock %}
 
-  <script>
+  <script nonce="{{ csp_nonce }}">
     // Highlight active nav route
     (function () {
       var path = window.location.pathname;

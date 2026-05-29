@@ -15,7 +15,7 @@
 <!-- ===== DNS ===== -->
 <div id="ti-dns" class="{% if tab != 'dns' %}hidden{% endif %}">
   <div class="flex-row" style="margin-bottom:8px">
-    <button class="secondary" onclick="SOC.dnsSync()">↻ Sync AdGuard log</button>
+    <button class="secondary" data-act="dnsSync">↻ Sync AdGuard log</button>
     <select id="dns-filter">
       <option value="all">All queries</option>
       <option value="blocked">Blocked only</option>
@@ -108,5 +108,5 @@
 {% endblock %}
 
 {% block scripts %}
-<script>SOC.initThreatIntel({{ tab|tojson }});</script>
+<script nonce="{{ csp_nonce }}">SOC.initThreatIntel({{ tab|tojson }});</script>
 {% endblock %}

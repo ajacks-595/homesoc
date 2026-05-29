@@ -12,8 +12,8 @@
      features depending on it will gracefully say "configure to enable".</p>
   <div id="host-config-form" class="flex-col" style="gap:10px"></div>
   <div class="flex-row" style="margin-top:10px">
-    <button onclick="SOC.hostConfigSave()">Save host config</button>
-    <button class="ghost" onclick="SOC.hostConfigTest()">Test connections</button>
+    <button data-act="hostConfigSave">Save host config</button>
+    <button class="ghost" data-act="hostConfigTest">Test connections</button>
     <span id="host-config-status" class="muted small"></span>
   </div>
 </div>
@@ -26,8 +26,8 @@
      as an <code>X-HomeSOC-Token</code> header (or <code>?token=</code> for the SSE feed).</p>
   <div id="home-api-status" class="flex-col" style="gap:8px"></div>
   <div class="flex-row" style="margin-top:10px; gap:8px">
-    <button onclick="SOC.homeApiGenerate()">Generate / rotate token</button>
-    <button class="ghost danger" onclick="SOC.homeApiClear()">Disable (clear token)</button>
+    <button data-act="homeApiGenerate">Generate / rotate token</button>
+    <button class="ghost danger" data-act="homeApiClear">Disable (clear token)</button>
   </div>
   <div id="home-api-token-reveal" class="hidden" style="margin-top:10px"></div>
   <div class="flex-row" style="margin-top:10px">
@@ -39,7 +39,7 @@
 <div class="card">
   <div class="flex-row" style="justify-content:space-between">
     <h2>Notifications &amp; Webhooks</h2>
-    <button onclick="SOC.webhookOpenAdd()">+ Add Webhook</button>
+    <button data-act="webhookOpenAdd">+ Add Webhook</button>
   </div>
   <p class="muted small">Push alerts to Mattermost, Slack, Discord, or any HTTPS endpoint.
      The URL is encrypted with this machine's Fernet key and never returned to the browser.</p>
@@ -76,12 +76,12 @@
     <input type="text" id="bk-host" placeholder="host (e.g. nas.local)" style="flex:1">
     <input type="text" id="bk-user" placeholder="user" style="flex:1">
     <input type="text" id="bk-path" placeholder="/volume1/Backups/soc-dashboard" style="flex:2">
-    <button class="small" onclick="SOC.backupNasSave()">Save target</button>
+    <button class="small" data-act="backupNasSave">Save target</button>
   </div>
   <div class="flex-row" style="gap:8px">
-    <button class="secondary" onclick="SOC.backupNasPush('config')">Push config now</button>
-    <button class="secondary" onclick="SOC.backupNasPush('full')">Push full now</button>
-    <button class="ghost danger" onclick="SOC.backupNasClear()">Clear target</button>
+    <button class="secondary" data-act="backupNasPush" data-arg="config">Push config now</button>
+    <button class="secondary" data-act="backupNasPush" data-arg="full">Push full now</button>
+    <button class="ghost danger" data-act="backupNasClear">Clear target</button>
   </div>
   <div id="bk-status" class="muted small" style="margin-top:8px"></div>
   <div class="divider"></div>
@@ -107,9 +107,9 @@
 
     <div class="divider"></div>
     <div class="flex-row">
-      <button class="secondary" onclick="SOC.pipelineRun('collect')">▶ Run Collection Now</button>
-      <button class="secondary" onclick="SOC.pipelineRun('analyse')">▶ Run Analysis Now</button>
-      <button class="ghost" onclick="SOC.pipelineRun('weekly')">▶ Run Weekly Now</button>
+      <button class="secondary" data-act="pipelineRun" data-arg="collect">▶ Run Collection Now</button>
+      <button class="secondary" data-act="pipelineRun" data-arg="analyse">▶ Run Analysis Now</button>
+      <button class="ghost" data-act="pipelineRun" data-arg="weekly">▶ Run Weekly Now</button>
     </div>
     <div class="muted small" id="pipeline-output" style="margin-top:8px"></div>
   </div>
@@ -128,7 +128,7 @@
       <tbody></tbody>
     </table>
     <div class="flex-row" style="margin-top:10px">
-      <button onclick="SOC.userOpenAdd()">+ Add User</button>
+      <button data-act="userOpenAdd">+ Add User</button>
     </div>
   </div>
 
@@ -165,5 +165,5 @@
 {% endblock %}
 
 {% block scripts %}
-<script>SOC.initSettings();</script>
+<script nonce="{{ csp_nonce }}">SOC.initSettings();</script>
 {% endblock %}

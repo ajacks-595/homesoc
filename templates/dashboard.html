@@ -30,7 +30,7 @@
 
   <div class="card">
     <h3>Quick OSINT Investigation</h3>
-    <form class="osint-bar" onsubmit="SOC.quickOsint(event)">
+    <form class="osint-bar" data-act="quickOsint">
       <input type="text" id="quick-osint-ioc" placeholder="IP, domain, URL, or hash">
       <button type="submit">Investigate</button>
     </form>
@@ -122,7 +122,7 @@
 {% endblock %}
 
 {% block scripts %}
-<script>
+<script nonce="{{ csp_nonce }}">
   SOC.initDashboard();
 </script>
 {% endblock %}

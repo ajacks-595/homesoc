@@ -6,8 +6,8 @@
 <div class="flex-row" style="justify-content:space-between; margin-bottom:14px">
   <h1>False Positive Manager</h1>
   <div class="flex-row">
-    <button class="secondary" onclick="SOC.fpRefresh()">↻ Reload from Wazuh</button>
-    <button onclick="SOC.fpOpenAdd()">+ Add Suppression</button>
+    <button class="secondary" data-act="fpRefresh">↻ Reload from Wazuh</button>
+    <button data-act="fpOpenAdd">+ Add Suppression</button>
   </div>
 </div>
 
@@ -47,5 +47,5 @@
 {% endblock %}
 
 {% block scripts %}
-<script>SOC.initFp();</script>
+<script nonce="{{ csp_nonce }}">SOC.initFp();</script>
 {% endblock %}
