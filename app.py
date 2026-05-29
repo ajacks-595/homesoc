@@ -52,6 +52,42 @@ def err(message: str, code: int = 400, **extra):
     return jsonify({"success": False, "data": None, "error": message, **extra}), code
 
 
+class BadParam(ValueError):
+    """A request parameter failed to parse — surfaced as a 400 JSON error
+    (via an errorhandler) instead of a bare int() ValueError → 500."""
+
+
+def int_arg(name: str, default: int | None = None, *,
+            minimum: int | None = None, maximum: int | None = None) -> int | None:
+    """Parse an integer query-string arg. Missing/empty → default. Raises
+    BadParam on a non-integer value; clamps to [minimum, maximum] if given."""
+    raw = request.args.get(name)
+    if raw is None or raw == "":
+        if default is None:
+            return None
+        raw = str(default)
+    try:
+        v = int(raw)
+    except (TypeError, ValueError):
+        raise BadParam(f"{name} must be an integer")
+    if minimum is not None:
+        v = max(v, minimum)
+    if maximum is not None:
+        v = min(v, maximum)
+    return v
+
+
+def int_field(data: dict, name: str, default: int) -> int:
+    """Parse an integer from a JSON body field. Missing/None → default. Raises
+    BadParam on a non-integer value."""
+    if name not in data or data[name] is None:
+        return default
+    try:
+        return int(data[name])
+    except (TypeError, ValueError):
+        raise BadParam(f"{name} must be an integer")
+
+
 def row_to_dict(row) -> dict:
     if row is None:
         return {}
@@ -244,8 +280,8 @@ def dashboard_stats():
 
 @api_bp.route("/alerts")
 def alerts_query():
-    page = max(int(request.args.get("page", "1")), 1)
-    per_page = min(int(request.args.get("per_page", "50")), 200)
+    page = int_arg("page", 1, minimum=1)
+    per_page = int_arg("per_page", 50, minimum=1, maximum=200)
     # statuses: comma-separated list, or empty → all (no filter)
     # default: 'open' only — matches the typical "what's on my queue" mental model.
     raw_statuses = request.args.get("statuses")
@@ -260,7 +296,7 @@ def alerts_query():
         date_to=request.args.get("date_to"),
         agent=request.args.get("agent"),
         rule_id=request.args.get("rule_id"),
-        min_level=int(request.args["min_level"]) if request.args.get("min_level") else None,
+        min_level=int_arg("min_level"),
         group=request.args.get("group"),
         search=request.args.get("q"),
         statuses=statuses,
@@ -427,8 +463,8 @@ def alerts_ack(aid: int):
 
 @api_bp.route("/alerts/latest")
 def alerts_latest():
-    rows = db.latest_alerts(min_level=int(request.args.get("min_level", "7")),
-                            limit=int(request.args.get("limit", "10")))
+    rows = db.latest_alerts(min_level=int_arg("min_level", 7),
+                            limit=int_arg("limit", 10))
     return ok([row_to_dict(r) for r in rows])
 
 
@@ -447,7 +483,7 @@ def alerts_export():
         date_to=request.args.get("date_to"),
         agent=request.args.get("agent"),
         rule_id=request.args.get("rule_id"),
-        min_level=int(request.args["min_level"]) if request.args.get("min_level") else None,
+        min_level=int_arg("min_level"),
         group=request.args.get("group"),
         search=request.args.get("q"),
         limit=10000,
@@ -782,7 +818,7 @@ def dns_trend():
 
 @api_bp.route("/dns/sync", methods=["POST"])
 def dns_sync():
-    n = int(request.args.get("days", "1"))
+    n = int_arg("days", 1)
     if n <= 1:
         return ok(sync.sync_dns_today())
     return ok({"days": sync.sync_dns_last_n(n)})
@@ -1413,7 +1449,7 @@ def users_delete(uid: int):
 @api_bp.route("/audit-log")
 def audit_get():
     rows = db.audit_list(
-        limit=int(request.args.get("limit", "200")),
+        limit=int_arg("limit", 200),
         action=request.args.get("action"),
         target_type=request.args.get("target_type"),
     )
@@ -1476,9 +1512,9 @@ def webhooks_create():
     ok_url, why = notifications.validate_webhook_url(url)
     if not ok_url:
         return err(f"invalid webhook URL: {why}")
-    sev = int(p.get("severity_min", 7))
+    sev = int_field(p, "severity_min", 7)
     include_ai = bool(p.get("include_ai", True))
-    dedup_minutes = int(p.get("dedup_minutes", 240))
+    dedup_minutes = int_field(p, "dedup_minutes", 240)
     wid = db.insert_webhook(name, platform, config.encrypt(url),
                             sev, include_ai, dedup_minutes)
     return ok({"id": wid})
@@ -1498,10 +1534,10 @@ def webhooks_update(wid: int):
         if not ok_url:
             return err(f"invalid webhook URL: {why}")
         updates["url_encrypted"] = config.encrypt(p["url"])
-    if "severity_min" in p: updates["severity_min"] = int(p["severity_min"])
+    if "severity_min" in p: updates["severity_min"] = int_field(p, "severity_min", 7)
     if "include_ai"   in p: updates["include_ai"]   = 1 if p["include_ai"] else 0
     if "enabled"      in p: updates["enabled"]      = 1 if p["enabled"] else 0
-    if "dedup_minutes" in p: updates["dedup_minutes"] = int(p["dedup_minutes"])
+    if "dedup_minutes" in p: updates["dedup_minutes"] = int_field(p, "dedup_minutes", 240)
     if not updates:
         return err("nothing to update")
     db.update_webhook(wid, **updates)
@@ -1602,6 +1638,10 @@ def create_app() -> Flask:
     @app.context_processor
     def _inject_user():
         return {"current_user": auth.current_user()}
+
+    @app.errorhandler(BadParam)
+    def _bad_param(e):
+        return err(str(e), 400)
 
     @app.errorhandler(404)
     def not_found(_e):
