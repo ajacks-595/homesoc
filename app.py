@@ -1415,10 +1415,13 @@ def users_create():
     password = p.get("password") or ""
     if not username or len(password) < 8:
         return err("username and 8+ char password required")
+    role = (p.get("role") or "user").strip().lower()
+    if role not in ("admin", "user"):
+        return err("role must be 'admin' or 'user'")
     if db.get_user_by_username(username):
         return err("username taken")
-    uid = db.insert_user(username, auth.hash_password(password), role=p.get("role") or "user")
-    auth.audit("user.create", "user", uid, {"username": username})
+    uid = db.insert_user(username, auth.hash_password(password), role=role)
+    auth.audit("user.create", "user", uid, {"username": username, "role": role})
     return ok({"id": uid})
 
 
