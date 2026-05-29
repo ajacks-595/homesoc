@@ -123,16 +123,32 @@ def parse_wazuh_alert_line(line: str) -> dict[str, Any] | None:
     if ts:
         # Wazuh emits "2026-05-21T00:00:39.057+0000" — slice to seconds.
         ts = ts[:19]
+    rule_id = str(rule.get("id") or "")
+    # Wazuh emits integer rule levels, but guard the coercion so a single
+    # malformed line can't abort the batch (the caller only catches JSONDecodeError).
+    try:
+        rule_level = int(rule.get("level") or 0)
+    except (TypeError, ValueError):
+        rule_level = 0
+    full_log = a.get("full_log")
+    # wazuh_id is the dedup key (alerts.wazuh_id is UNIQUE). SQLite treats every
+    # NULL as distinct, so a missing id defeats INSERT OR IGNORE and the same
+    # alert re-inserts on every overlapping tail-poll. Synthesize a stable
+    # surrogate from the alert's identifying fields when Wazuh supplies no id.
+    wazuh_id = a.get("id")
+    if not wazuh_id:
+        basis = f"{a.get('timestamp','')}|{rule_id}|{a.get('location','')}|{full_log or ''}"
+        wazuh_id = "syn-" + hashlib.sha256(basis.encode("utf-8", "replace")).hexdigest()[:24]
     return {
-        "wazuh_id":         a.get("id"),
+        "wazuh_id":         wazuh_id,
         "timestamp":        ts,
         "agent_name":       agent.get("name"),
         "agent_ip":         agent.get("ip"),
-        "rule_id":          str(rule.get("id") or ""),
-        "rule_level":       int(rule.get("level") or 0),
+        "rule_id":          rule_id,
+        "rule_level":       rule_level,
         "rule_description": rule.get("description"),
         "rule_groups":      rule.get("groups") or [],
-        "full_log":         a.get("full_log"),
+        "full_log":         full_log,
         "location":         a.get("location"),
         "raw":              a,
     }
