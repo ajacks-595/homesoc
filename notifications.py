@@ -6,9 +6,13 @@ module formats and delivers a payload appropriate for that platform.
 """
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
+import os
+import socket
 from typing import Any
+from urllib.parse import urlparse
 
 import requests
 
@@ -18,6 +22,59 @@ import database as db
 log = logging.getLogger("soc.notify")
 
 _TIMEOUT = 15
+
+# SSRF guard. Loopback / link-local (incl. 169.254.169.254 cloud metadata) /
+# multicast / reserved / unspecified are ALWAYS rejected. Private LAN ranges
+# (10/8, 172.16/12, 192.168/16, fc00::/7) are permitted by default because
+# HomeSOC commonly posts to a self-hosted Mattermost on the LAN; set
+# SOC_WEBHOOK_ALLOW_PRIVATE=0 to block them too (e.g. once the dashboard is
+# exposed through a public reverse proxy).
+_ALLOW_PRIVATE = os.environ.get("SOC_WEBHOOK_ALLOW_PRIVATE", "1") == "1"
+
+
+def _ip_is_blocked(ip_str: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return True  # unparseable → block
+    if (ip.is_loopback or ip.is_link_local or ip.is_multicast
+            or ip.is_reserved or ip.is_unspecified):
+        return True
+    if ip.is_private and not _ALLOW_PRIVATE:
+        return True
+    return False
+
+
+def validate_webhook_url(url: str) -> tuple[bool, str]:
+    """SSRF guard for outbound webhook POSTs. Returns (ok, reason).
+
+    Enforces http(s) and resolves the host, rejecting if ANY resolved address
+    is loopback/link-local/metadata/multicast/reserved/unspecified (or private
+    when SOC_WEBHOOK_ALLOW_PRIVATE=0). Note: a determined DNS-rebinding attacker
+    could still race the resolve vs. the connect; full mitigation would pin the
+    resolved IP. This closes the "no validation at all" gap for a LAN tool."""
+    try:
+        u = urlparse(url or "")
+    except ValueError:
+        return False, "unparseable URL"
+    if u.scheme not in ("http", "https"):
+        return False, f"scheme must be http or https (got {u.scheme or 'none'!r})"
+    host = u.hostname
+    if not host:
+        return False, "missing host"
+    try:
+        infos = socket.getaddrinfo(
+            host, u.port or (443 if u.scheme == "https" else 80),
+            proto=socket.IPPROTO_TCP)
+    except socket.gaierror as e:
+        return False, f"DNS resolution failed: {e}"
+    addrs = {info[4][0] for info in infos}
+    if not addrs:
+        return False, "no addresses resolved"
+    for a in addrs:
+        if _ip_is_blocked(a):
+            return False, f"host resolves to a blocked address ({a})"
+    return True, "ok"
 
 
 # ---------- formatters ----------------------------------------------------
@@ -133,8 +190,14 @@ def send_to_webhook(webhook_row, alert: dict[str, Any],
                     dedup_count: int = 0) -> tuple[bool, str]:
     """Format + POST to a webhook. Returns (success, response_snippet)."""
     url = _decrypt_url(webhook_row["url_encrypted"])
-    if not url:
+    if url is None:
         return False, "url decrypt failed (wrong machine?)"
+    if not url:
+        return False, "webhook URL is empty"
+
+    ok_url, why = validate_webhook_url(url)
+    if not ok_url:
+        return False, f"refusing webhook URL: {why}"
 
     formatter = _FORMATTERS.get(webhook_row["platform"])
     if not formatter:
@@ -143,7 +206,9 @@ def send_to_webhook(webhook_row, alert: dict[str, Any],
     payload = formatter(alert, ai_summary, dedup_count)
 
     try:
-        r = requests.post(url, json=payload, timeout=_TIMEOUT)
+        # allow_redirects=False: a permitted host must not be able to 302 the
+        # POST onward to an internal address (SSRF bypass).
+        r = requests.post(url, json=payload, timeout=_TIMEOUT, allow_redirects=False)
     except requests.RequestException as e:
         return False, f"network error: {e}"
 

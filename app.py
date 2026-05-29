@@ -1438,8 +1438,9 @@ def webhooks_create():
         return err("name required")
     if platform not in notifications.SUPPORTED_PLATFORMS:
         return err(f"platform must be one of: {', '.join(notifications.SUPPORTED_PLATFORMS)}")
-    if not url.startswith("http"):
-        return err("url must be an http(s) URL")
+    ok_url, why = notifications.validate_webhook_url(url)
+    if not ok_url:
+        return err(f"invalid webhook URL: {why}")
     sev = int(p.get("severity_min", 7))
     include_ai = bool(p.get("include_ai", True))
     dedup_minutes = int(p.get("dedup_minutes", 240))
@@ -1458,8 +1459,9 @@ def webhooks_update(wid: int):
             return err("invalid platform")
         updates["platform"] = p["platform"]
     if "url" in p and p["url"]:
-        if not str(p["url"]).startswith("http"):
-            return err("url must be http(s)")
+        ok_url, why = notifications.validate_webhook_url(str(p["url"]))
+        if not ok_url:
+            return err(f"invalid webhook URL: {why}")
         updates["url_encrypted"] = config.encrypt(p["url"])
     if "severity_min" in p: updates["severity_min"] = int(p["severity_min"])
     if "include_ai"   in p: updates["include_ai"]   = 1 if p["include_ai"] else 0
