@@ -160,16 +160,43 @@ const SOC = (() => {
 
   function ipLink(ip) {
     if (!ip) return "";
-    return `<a href="/osint?ioc=${encodeURIComponent(ip)}" class="mono">${ip}</a>`;
+    return `<a href="/osint?ioc=${encodeURIComponent(ip)}" class="mono">${escapeHtml(ip)}</a>`;
   }
 
-  // Find anything that looks like an IP in a piece of text and link it.
-  function linkifyIps(text) {
-    if (!text) return "";
-    return String(text).replace(
-      /\b(?:\d{1,3}\.){3}\d{1,3}\b/g,
-      m => `<a href="/osint?ioc=${encodeURIComponent(m)}" class="mono">${m}</a>`
-    );
+  const _IPV4_TEST = /\b(?:\d{1,3}\.){3}\d{1,3}\b/;
+  const _IPV4_GLOBAL = /\b(?:\d{1,3}\.){3}\d{1,3}\b/g;
+
+  // Link IPv4 addresses found in TEXT NODES of an element to OSINT lookups.
+  // Operates on the live DOM rather than round-tripping innerHTML, so it never
+  // re-parses or duplicates (possibly untrusted) markup. Skips text already
+  // inside an <a> so we don't double-link.
+  function linkifyIpsInEl(root) {
+    if (!root) return;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        if (!node.nodeValue || !_IPV4_TEST.test(node.nodeValue)) return NodeFilter.FILTER_REJECT;
+        for (let p = node.parentNode; p && p !== root.parentNode; p = p.parentNode) {
+          if (p.nodeName === "A") return NodeFilter.FILTER_REJECT;
+        }
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    });
+    const targets = [];
+    let node;
+    while ((node = walker.nextNode())) targets.push(node);
+    for (const t of targets) {
+      const text = t.nodeValue;
+      const frag = document.createDocumentFragment();
+      let last = 0, m;
+      _IPV4_GLOBAL.lastIndex = 0;
+      while ((m = _IPV4_GLOBAL.exec(text))) {
+        if (m.index > last) frag.appendChild(document.createTextNode(text.slice(last, m.index)));
+        frag.appendChild(el("a", { href: "/osint?ioc=" + encodeURIComponent(m[0]), className: "mono" }, m[0]));
+        last = m.index + m[0].length;
+      }
+      if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
+      t.parentNode.replaceChild(frag, t);
+    }
   }
 
   // ===== DASHBOARD ==========================================================
@@ -305,7 +332,7 @@ const SOC = (() => {
        <a class="agent" href="/alerts?agent=${encodeURIComponent(a.agent_name || "")}" onclick="event.stopPropagation()">${agent}</a>
        <span class="level">${a.rule_level}</span>
        <span class="desc">${desc}
-         <span class="muted tiny"> · rule ${a.rule_id}</span></span>`;
+         <span class="muted tiny"> · rule ${escapeHtml(a.rule_id)}</span></span>`;
     div.style.cursor = "pointer";
     div.addEventListener("click", () => {
       window.location.href = `/alerts?focus=${a.id}`;
@@ -344,8 +371,8 @@ const SOC = (() => {
       const row = el("div", { className: "flex-row", style: "padding:4px 0; border-bottom:1px solid var(--border)" });
       row.innerHTML = `
         <span class="dot ${h.agent_status || "no_agent"}"></span>
-        <span class="mono">${h.ip}</span>
-        <span style="flex:1">${h.hostname || "—"}</span>
+        <span class="mono">${escapeHtml(h.ip)}</span>
+        <span style="flex:1">${escapeHtml(h.hostname || "—")}</span>
         <span class="tiny muted">${h.last_seen ? fmt.age(h.last_seen) : ""}</span>`;
       host.appendChild(row);
     });
@@ -457,9 +484,25 @@ const SOC = (() => {
     if (v) window.location.href = "/osint?ioc=" + encodeURIComponent(v);
   }
 
+  // Attribute-safe HTML escaping. Encodes quotes too, so values interpolated
+  // into HTML *attribute* contexts (value="...", title="...") can't break out.
   function escapeHtml(s) {
     return (s == null ? "" : String(s))
-      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  }
+
+  // Allow only http(s)/mailto absolute URLs and same-origin relative paths into
+  // href/src. Rejects javascript:, data:, vbscript:, and protocol-relative
+  // (//evil) URLs — returns "" so the attribute is inert. Use together with
+  // escapeHtml for the attribute-quote layer.
+  function safeUrl(u) {
+    if (u == null) return "";
+    const s = String(u).trim();
+    if (/^https?:\/\//i.test(s)) return s;
+    if (/^mailto:/i.test(s)) return s;
+    if (/^[/#?]/.test(s) && !s.startsWith("//")) return s;   // same-origin relative
+    return "";
   }
 
   // ===== BRIEFINGS ==========================================================
@@ -585,7 +628,7 @@ const SOC = (() => {
     if (dayNode) dayNode.classList.add("selected");
     // Link IPs in the rendered briefing body
     const body = document.getElementById("b-reader-body");
-    body.innerHTML = linkifyIps(body.innerHTML);
+    linkifyIpsInEl(body);
   }
 
   // ===== ALERTS =============================================================
@@ -640,7 +683,7 @@ const SOC = (() => {
       <td><input type="checkbox" class="sel" value="${a.id}"></td>
       <td class="mono small">${fmt.ts(a.timestamp)}</td>
       <td><a href="/alerts?agent=${encodeURIComponent(a.agent_name || "")}">${escapeHtml(a.agent_name || "—")}</a></td>
-      <td><a href="/alerts?rule_id=${a.rule_id}" class="mono">${a.rule_id}</a></td>
+      <td><a href="/alerts?rule_id=${encodeURIComponent(a.rule_id)}" class="mono">${escapeHtml(a.rule_id)}</a></td>
       <td class="mono">${a.rule_level}</td>
       <td>${escapeHtml(fmt.short(a.rule_description, 110))}</td>
       <td class="mono tiny">${escapeHtml(a.location || "")}</td>`;
@@ -722,7 +765,7 @@ const SOC = (() => {
         `<td><input type="checkbox" class="sel" value="${a.id}"></td>
          <td class="mono small">${fmt.ts(a.timestamp)}</td>
          <td><a href="/alerts?agent=${encodeURIComponent(a.agent_name || "")}" class="agent-jump">${escapeHtml(a.agent_name || "—")}</a></td>
-         <td><a href="#" class="rule-jump mono" data-rid="${a.rule_id}">${a.rule_id}</a></td>
+         <td><a href="#" class="rule-jump mono" data-rid="${escapeHtml(a.rule_id)}">${escapeHtml(a.rule_id)}</a></td>
          <td class="mono">${a.rule_level}</td>
          <td>${badge}${escapeHtml(fmt.short(a.rule_description, 110))}</td>
          <td class="mono tiny">${escapeHtml(a.location || "")}</td>`;
@@ -838,7 +881,7 @@ const SOC = (() => {
         </div>
       </div>
       ${ackControls}`;
-    td.innerHTML = linkifyIps(td.innerHTML);
+    linkifyIpsInEl(td);
     x.appendChild(td);
     tr.parentNode.insertBefore(x, tr.nextSibling);
 
@@ -860,7 +903,7 @@ const SOC = (() => {
            <div class="chat-content markdown">${m.html || escapeHtml(m.content)}</div>
          </div>`
       ).join("");
-      chatLog.innerHTML = linkifyIps(chatLog.innerHTML);
+      linkifyIpsInEl(chatLog);
       chatLog.scrollTop = chatLog.scrollHeight;
     }
 
@@ -910,7 +953,7 @@ const SOC = (() => {
       aiBody.innerHTML = `
         <div class="flex-row" style="margin-bottom:6px">${cacheMeta}${modelMeta}</div>
         ${d.html || ""}`;
-      aiBody.innerHTML = linkifyIps(aiBody.innerHTML);
+      linkifyIpsInEl(aiBody);
       // Reveal the follow-up chat UI now that we have an explanation to anchor on
       aiChat?.classList.remove("hidden");
       loadChat();
@@ -987,7 +1030,7 @@ const SOC = (() => {
           ${v.updated ? `<dt>Updated</dt><dd>${escapeHtml(v.updated.slice(0,10))}</dd>` : ""}
         </dl>
         ${v.rationale ? `<div style="margin-top:8px"><strong>Rationale:</strong><div class="small">${escapeHtml(v.rationale)}</div></div>` : ""}
-        ${refs.length ? `<div style="margin-top:8px"><strong>References:</strong>${refs.map(r => `<div class="tiny mono"><a href="${r}" target="_blank" rel="noopener">${escapeHtml(r)}</a></div>`).join("")}</div>` : ""}
+        ${refs.length ? `<div style="margin-top:8px"><strong>References:</strong>${refs.map(r => `<div class="tiny mono"><a href="${escapeHtml(safeUrl(r))}" target="_blank" rel="noopener">${escapeHtml(r)}</a></div>`).join("")}</div>` : ""}
       `;
     }
 
@@ -1086,35 +1129,35 @@ const SOC = (() => {
       }
       panel.innerHTML = `
         ${cacheBadge}
-        <div class="value mono" style="font-size:26px; margin:6px 0">${d.detection}</div>
+        <div class="value mono" style="font-size:26px; margin:6px 0">${escapeHtml(d.detection)}</div>
         <dl class="kv">
-          <dt>Malicious</dt><dd>${d.malicious}</dd>
-          <dt>Suspicious</dt><dd>${d.suspicious}</dd>
-          <dt>Harmless</dt><dd>${d.harmless}</dd>
-          <dt>Undetected</dt><dd>${d.undetected}</dd>
-          ${d.country ? `<dt>Country</dt><dd>${d.country}</dd>` : ""}
+          <dt>Malicious</dt><dd>${escapeHtml(d.malicious)}</dd>
+          <dt>Suspicious</dt><dd>${escapeHtml(d.suspicious)}</dd>
+          <dt>Harmless</dt><dd>${escapeHtml(d.harmless)}</dd>
+          <dt>Undetected</dt><dd>${escapeHtml(d.undetected)}</dd>
+          ${d.country ? `<dt>Country</dt><dd>${escapeHtml(d.country)}</dd>` : ""}
           ${d.as_owner ? `<dt>ASN</dt><dd>${escapeHtml(d.as_owner)}</dd>` : ""}
           ${d.categories?.length ? `<dt>Categories</dt><dd>${d.categories.map(c => escapeHtml(c)).join(", ")}</dd>` : ""}
-          ${d.last_analysis_date ? `<dt>Last analysed</dt><dd>${new Date(d.last_analysis_date * 1000).toISOString().slice(0,19)}</dd>` : ""}
+          ${d.last_analysis_date ? `<dt>Last analysed</dt><dd>${escapeHtml(new Date(d.last_analysis_date * 1000).toISOString().slice(0,19))}</dd>` : ""}
         </dl>
-        <p><a href="${d.report_url}" target="_blank" rel="noopener">Open in VT →</a></p>`;
+        <p><a href="${escapeHtml(safeUrl(d.report_url))}" target="_blank" rel="noopener">Open in VT →</a></p>`;
     } else if (source === "abuseipdb") {
       const c = d.abuse_confidence ?? 0;
       const cls = c >= 75 ? "high" : c >= 25 ? "med" : "low";
       panel.innerHTML = `
         ${cacheBadge}
-        <div class="conf ${cls}" style="font-size:22px; padding:4px 14px; margin:6px 0">${c}% abuse</div>
+        <div class="conf ${cls}" style="font-size:22px; padding:4px 14px; margin:6px 0">${escapeHtml(c)}% abuse</div>
         <dl class="kv">
-          ${d.country_code ? `<dt>Country</dt><dd>${d.country_code} — ${escapeHtml(d.country_name || "")}</dd>` : ""}
+          ${d.country_code ? `<dt>Country</dt><dd>${escapeHtml(d.country_code)} — ${escapeHtml(d.country_name || "")}</dd>` : ""}
           ${d.isp ? `<dt>ISP</dt><dd>${escapeHtml(d.isp)}</dd>` : ""}
           ${d.usage_type ? `<dt>Usage</dt><dd>${escapeHtml(d.usage_type)}</dd>` : ""}
           ${d.domain ? `<dt>Domain</dt><dd>${escapeHtml(d.domain)}</dd>` : ""}
           <dt>Total reports</dt><dd>${fmt.int(d.total_reports)}</dd>
-          ${d.last_reported_at ? `<dt>Last report</dt><dd>${d.last_reported_at.replace("T", " ").slice(0, 19)}</dd>` : ""}
+          ${d.last_reported_at ? `<dt>Last report</dt><dd>${escapeHtml(d.last_reported_at.replace("T", " ").slice(0, 19))}</dd>` : ""}
           ${d.is_tor ? `<dt>TOR</dt><dd>yes</dd>` : ""}
           ${d.is_whitelisted ? `<dt>Whitelisted</dt><dd>yes</dd>` : ""}
         </dl>
-        <p><a href="${d.report_url}" target="_blank" rel="noopener">Open in AbuseIPDB →</a></p>`;
+        <p><a href="${escapeHtml(safeUrl(d.report_url))}" target="_blank" rel="noopener">Open in AbuseIPDB →</a></p>`;
     } else if (source === "urlscan") {
       if (!d.found) {
         panel.innerHTML = `<div class="muted small">No prior scans found. ${cacheBadge}</div>`;
@@ -1124,14 +1167,14 @@ const SOC = (() => {
         ${cacheBadge}
         <dl class="kv">
           <dt>Verdict</dt><dd>${d.verdict === "malicious" ? '<span class="badge danger">malicious</span>' : '<span class="badge ok">clean</span>'}</dd>
-          ${d.score != null ? `<dt>Score</dt><dd>${d.score}</dd>` : ""}
-          ${d.scan_date ? `<dt>Scan date</dt><dd>${d.scan_date.slice(0, 19)}</dd>` : ""}
+          ${d.score != null ? `<dt>Score</dt><dd>${escapeHtml(d.score)}</dd>` : ""}
+          ${d.scan_date ? `<dt>Scan date</dt><dd>${escapeHtml(d.scan_date.slice(0, 19))}</dd>` : ""}
           ${d.page_url ? `<dt>Page URL</dt><dd class="mono tiny">${escapeHtml(d.page_url)}</dd>` : ""}
           ${d.page_ip ? `<dt>Page IP</dt><dd>${ipLink(d.page_ip)}</dd>` : ""}
           ${d.categories?.length ? `<dt>Categories</dt><dd>${d.categories.map(c => escapeHtml(c)).join(", ")}</dd>` : ""}
         </dl>
-        ${d.screenshot ? `<img src="${d.screenshot}" style="max-width:100%; border:1px solid var(--border); border-radius:6px; margin-top:8px">` : ""}
-        ${d.scan_url ? `<p><a href="${d.scan_url}" target="_blank" rel="noopener">Open full scan →</a></p>` : ""}`;
+        ${d.screenshot && safeUrl(d.screenshot) ? `<img src="${escapeHtml(safeUrl(d.screenshot))}" style="max-width:100%; border:1px solid var(--border); border-radius:6px; margin-top:8px">` : ""}
+        ${d.scan_url && safeUrl(d.scan_url) ? `<p><a href="${escapeHtml(safeUrl(d.scan_url))}" target="_blank" rel="noopener">Open full scan →</a></p>` : ""}`;
     }
   }
 
@@ -1147,8 +1190,8 @@ const SOC = (() => {
       html += `<table class="data"><tbody>`;
       d.alerts.forEach(a => {
         html += `<tr><td class="mono small">${fmt.ts(a.timestamp)}</td>
-                     <td>${a.agent_name || ""}</td>
-                     <td><a href="/alerts?rule_id=${a.rule_id}">${a.rule_id}</a></td>
+                     <td>${escapeHtml(a.agent_name || "")}</td>
+                     <td><a href="/alerts?rule_id=${encodeURIComponent(a.rule_id)}">${escapeHtml(a.rule_id)}</a></td>
                      <td>${escapeHtml(fmt.short(a.rule_description, 60))}</td></tr>`;
       });
       html += `</tbody></table>`;
@@ -1188,13 +1231,13 @@ const SOC = (() => {
       const db = dbByRid[p.wazuh_rule_id];
       const tr = el("tr");
       tr.innerHTML = `
-        <td class="mono">${p.wazuh_rule_id}</td>
-        <td class="mono">${p.rule_id}</td>
-        <td>${p.agent_name || "<em class='muted'>all</em>"}</td>
+        <td class="mono">${escapeHtml(p.wazuh_rule_id)}</td>
+        <td class="mono">${escapeHtml(p.rule_id)}</td>
+        <td>${p.agent_name ? escapeHtml(p.agent_name) : "<em class='muted'>all</em>"}</td>
         <td>${escapeHtml(p.description)}</td>
         <td class="muted small">${db ? fmt.ts(db.created_at) : "—"}</td>
         <td class="mono right">${db ? fmt.int(db.alert_count) : 0}</td>
-        <td><button class="danger small" data-fp-id="${db?.id || ''}" data-wid="${p.wazuh_rule_id}">Delete</button></td>`;
+        <td><button class="danger small" data-fp-id="${db?.id || ''}" data-wid="${escapeHtml(p.wazuh_rule_id)}">Delete</button></td>`;
       tbody.appendChild(tr);
     });
     tbody.querySelectorAll("button[data-fp-id]").forEach(b => {
@@ -1457,11 +1500,11 @@ const SOC = (() => {
     r.data.forEach(h => {
       const tr = el("tr");
       tr.innerHTML = `
-        <td class="mono">${h.ip}</td>
+        <td class="mono">${escapeHtml(h.ip)}</td>
         <td><input class="inline-edit" data-id="${h.id}" data-field="hostname" value="${escapeHtml(h.hostname || "")}"></td>
         <td><input class="inline-edit" data-id="${h.id}" data-field="role" value="${escapeHtml(h.role || "")}"></td>
-        <td class="mono">${h.agent_id || "—"}</td>
-        <td><span class="dot ${h.agent_status || "no_agent"}"></span>${h.agent_status || "—"}</td>
+        <td class="mono">${escapeHtml(h.agent_id || "—")}</td>
+        <td><span class="dot ${h.agent_status || "no_agent"}"></span>${escapeHtml(h.agent_status || "—")}</td>
         <td class="muted small">${h.last_seen ? fmt.age(h.last_seen) : "—"}</td>
         <td class="mono right">${fmt.int(h.alert_count_7d)}</td>
         <td><input class="inline-edit" data-id="${h.id}" data-field="notes" value="${escapeHtml(h.notes || "")}"></td>
@@ -1497,7 +1540,7 @@ const SOC = (() => {
       html += `<div class="alert-feed">`;
       r.data.forEach(a => html += `<div class="alert-row ${sevClass(a.rule_level)}">
         <span class="ts">${fmt.ts(a.timestamp)}</span>
-        <span class="agent">${a.agent_name || "—"}</span>
+        <span class="agent">${escapeHtml(a.agent_name || "—")}</span>
         <span class="level">${a.rule_level}</span>
         <span class="desc">${escapeHtml(fmt.short(a.rule_description, 200))}</span></div>`);
       html += `</div>`;
@@ -1648,7 +1691,7 @@ const SOC = (() => {
         const tr = el("tr");
         tr.innerHTML = `
           <td class="mono small">${fmt.ts(a.timestamp)}</td>
-          <td>${a.agent_name || ""}</td>
+          <td>${escapeHtml(a.agent_name || "")}</td>
           <td>${src ? ipLink(src) : ""}</td>
           <td>${escapeHtml(fmt.short(a.rule_description, 80))}</td>
           <td class="mono">${a.rule_level}</td>`;
@@ -1848,7 +1891,7 @@ const SOC = (() => {
       const status = u.disabled ? '<span class="badge muted">disabled</span>' : '<span class="badge ok">active</span>';
       tr.innerHTML = `
         <td><strong>${escapeHtml(u.username)}</strong></td>
-        <td><span class="badge accent">${u.role}</span></td>
+        <td><span class="badge accent">${escapeHtml(u.role)}</span></td>
         <td class="muted small">${u.last_login_at ? fmt.age(u.last_login_at) : "never"}</td>
         <td>${status}</td>
         <td class="flex-row" style="gap:4px">
