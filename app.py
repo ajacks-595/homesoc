@@ -567,6 +567,44 @@ def briefing_detail(bid: int):
     })
 
 
+def _briefing_html_doc(btype: str, date: str, body_html: str) -> str:
+    """Wrap sanitized briefing HTML in a self-contained, printable document
+    (no external assets, so it works offline and 'Print → Save as PDF')."""
+    import html as _html
+    title = f"{(btype or 'daily').capitalize()} briefing — {date}"
+    return (
+        '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        f"<title>{_html.escape(title)}</title>"
+        "<style>body{font-family:system-ui,-apple-system,sans-serif;max-width:820px;"
+        "margin:2rem auto;padding:0 1rem;line-height:1.55;color:#1a1a1a}"
+        "h1,h2,h3{line-height:1.25}code,pre{font-family:ui-monospace,monospace}"
+        "pre{background:#f4f4f4;padding:.75rem;overflow:auto;border-radius:6px}"
+        "table{border-collapse:collapse}td,th{border:1px solid #ddd;padding:4px 8px}"
+        "blockquote{border-left:3px solid #ccc;margin:0;padding-left:1rem;color:#555}</style>"
+        f"</head><body><h1>{_html.escape(title)}</h1>{body_html}</body></html>"
+    )
+
+
+@api_bp.route("/briefings/<int:bid>/export")
+def briefing_export(bid: int):
+    """Download a briefing as a self-contained HTML doc or raw markdown."""
+    row = db.get_briefing(bid)
+    if not row:
+        return err("not found", 404)
+    fmt = (request.args.get("format") or "html").lower()
+    name = f"briefing-{row['type']}-{row['date']}"
+    if fmt == "md":
+        data = (row["content"] or "").encode("utf-8")
+        return send_file(io.BytesIO(data), mimetype="text/markdown",
+                         as_attachment=True, download_name=f"{name}.md")
+    if fmt == "html":
+        doc = _briefing_html_doc(row["type"], row["date"], render_md(row["content"]))
+        return send_file(io.BytesIO(doc.encode("utf-8")), mimetype="text/html",
+                         as_attachment=True, download_name=f"{name}.html")
+    return err("format must be 'html' or 'md'")
+
+
 @api_bp.route("/briefings/sync", methods=["POST"])
 def briefings_sync():
     res = sync.sync_briefings()

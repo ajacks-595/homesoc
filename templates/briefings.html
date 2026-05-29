@@ -24,9 +24,15 @@
   </div>
 
   <div class="card" id="b-reader-card">
-    <div class="flex-row" style="justify-content:space-between">
+    <div class="flex-row" style="justify-content:space-between; align-items:center">
       <h2 id="b-reader-title">Select a briefing</h2>
-      <div class="muted small" id="b-reader-meta"></div>
+      <div class="flex-row" style="gap:8px; align-items:center">
+        <span class="muted small" id="b-reader-meta"></span>
+        <span id="b-reader-export" class="hidden flex-row" style="gap:6px">
+          <a class="btn ghost small" id="b-export-html">Export HTML</a>
+          <a class="btn ghost small" id="b-export-md">Export MD</a>
+        </span>
+      </div>
     </div>
     <div class="divider"></div>
     <div class="markdown" id="b-reader-body">

@@ -639,6 +639,13 @@ const SOC = (() => {
     document.getElementById("b-reader-body").innerHTML = d.html;
     document.querySelectorAll(".calendar .day").forEach(n => n.classList.remove("selected"));
     if (dayNode) dayNode.classList.add("selected");
+    // Export links (HTML / Markdown download) for the open briefing
+    const exp = document.getElementById("b-reader-export");
+    if (exp) {
+      document.getElementById("b-export-html").href = `/api/briefings/${encodeURIComponent(id)}/export?format=html`;
+      document.getElementById("b-export-md").href = `/api/briefings/${encodeURIComponent(id)}/export?format=md`;
+      exp.classList.remove("hidden");
+    }
     // Link IPs in the rendered briefing body
     const body = document.getElementById("b-reader-body");
     linkifyIpsInEl(body);
