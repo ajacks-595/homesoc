@@ -76,6 +76,7 @@ const SOC = (() => {
 
   function openModal(html, opts = {}) {
     const root = document.getElementById("modal-root");
+    if (!root) return null;
     root.innerHTML = "";
     const back = el("div", { className: "modal-backdrop", onclick: e => {
       if (e.target.classList.contains("modal-backdrop")) closeModal();
@@ -89,7 +90,8 @@ const SOC = (() => {
   }
 
   function closeModal() {
-    document.getElementById("modal-root").innerHTML = "";
+    const root = document.getElementById("modal-root");
+    if (root) root.innerHTML = "";
   }
 
   function openSidePanel(html) {
@@ -224,7 +226,7 @@ const SOC = (() => {
     if (!r.success) return;
     const d = r.data;
     document.getElementById("m-alerts-today").textContent = fmt.int(d.alerts_today);
-    document.getElementById("m-block-rate").textContent = d.block_rate.toFixed(1);
+    document.getElementById("m-block-rate").textContent = (d.block_rate ?? 0).toFixed(1);
     document.getElementById("m-block-rate-sub").textContent =
       `${fmt.int(d.dns_blocked)} / ${fmt.int(d.dns_total)} blocked`;
     document.getElementById("m-agents").textContent = fmt.int(d.active_agents);
@@ -664,7 +666,8 @@ const SOC = (() => {
       document.getElementById("f-level-out").textContent = qp.get("min_level");
     }
     // ?focus=<id> opens that alert at the top of the list, expanded
-    alertsState.focusId = qp.get("focus") ? parseInt(qp.get("focus"), 10) : null;
+    const _focus = qp.get("focus") ? parseInt(qp.get("focus"), 10) : NaN;
+    alertsState.focusId = Number.isInteger(_focus) ? _focus : null;
 
     await loadAlerts();
 
@@ -895,8 +898,10 @@ const SOC = (() => {
     const chatForm = aiChat?.querySelector(`[data-chat-form="${a.id}"]`);
     const chatClearBtn = aiChat?.querySelector(`[data-chat-clear="${a.id}"]`);
 
+    let lastHistory = [];   // last rendered chat history (for optimistic appends)
     function renderChatLog(history) {
       if (!chatLog) return;
+      lastHistory = history;
       chatLog.innerHTML = history.map(m =>
         `<div class="chat-msg chat-${m.role}">
            <div class="chat-role">${m.role === "user" ? "You" : "Claude"}</div>
@@ -917,8 +922,9 @@ const SOC = (() => {
       e.preventDefault();
       const msg = chatInput.value.trim();
       if (!msg) return;
-      // Optimistically append the user message + a placeholder
-      const optimistic = [...(await api(`/api/alerts/${a.id}/chat`)).data.history,
+      // Optimistically append the user message + a placeholder to what's
+      // already shown (no extra round-trip, no .data.history throw on a failed GET)
+      const optimistic = [...lastHistory,
         { role: "user", content: msg, html: escapeHtml(msg) },
         { role: "assistant", content: "...",
           html: `<div class="flex-row"><div class="spinner"></div><span class="muted small">Claude is thinking (web search may take ~30s)…</span></div>` }];
@@ -963,8 +969,9 @@ const SOC = (() => {
       aiBody.innerHTML = `<div class="flex-row"><div class="spinner"></div>
         <span class="muted small">Asking Claude (web-enabled lookup, ~60-90s)…</span></div>`;
       aiBtn.disabled = true;
-      const r = await api(`/api/alerts/${a.id}/explain`,
-        { method: forceRefresh ? "POST" : "POST" });
+      // POST always (re)generates server-side; the GET auto-load handles the
+      // cached case separately. forceRefresh is kept for call-site clarity.
+      const r = await api(`/api/alerts/${a.id}/explain`, { method: "POST" });
       aiBtn.disabled = false;
       if (!r.success) {
         aiBody.innerHTML = `<div class="muted small">⚠ ${escapeHtml(r.error)}</div>`;
@@ -1391,7 +1398,8 @@ const SOC = (() => {
     if (!list.success) return;
 
     const cols = { open: [], in_progress: [], resolved: [] };
-    list.data.forEach(a => cols[a.status]?.push(a));
+    // Bucket any unknown status into "open" rather than silently dropping it.
+    list.data.forEach(a => (cols[a.status] || cols.open).push(a));
 
     document.getElementById("kc-open").textContent = cols.open.length;
     document.getElementById("kc-inprog").textContent = cols.in_progress.length;
@@ -1416,7 +1424,10 @@ const SOC = (() => {
   }
 
   function ageHours(iso) {
-    const t = new Date((iso || "").replace(" ", "T") + (iso?.endsWith("Z") ? "" : "Z"));
+    // Reuse parseUtc so timestamps that already carry a numeric offset
+    // (e.g. +00:00) aren't double-suffixed into an Invalid Date → NaN.
+    const t = parseUtc(iso);
+    if (!t || isNaN(t)) return 0;
     return (Date.now() - t.getTime()) / 3600000;
   }
 

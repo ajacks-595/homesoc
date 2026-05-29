@@ -14,7 +14,7 @@ const marker = "  // ===== expose";
 assert.ok(src.includes(marker), "expose marker not found — did main.js change?");
 src = src.replace(
   marker,
-  "  globalThis.__h = { escapeHtml, safeUrl, linkifyIpsInEl };\n" + marker,
+  "  globalThis.__h = { escapeHtml, safeUrl, linkifyIpsInEl, parseUtc, ageHours };\n" + marker,
 );
 
 // ---- minimal DOM shim (enough for el() + linkifyIpsInEl) ------------------
@@ -69,7 +69,7 @@ const sandbox = { document, NodeFilter, window: {}, console,
   URLSearchParams, setTimeout, Chart: function () {}, navigator: {} };
 vm.createContext(sandbox);
 vm.runInContext(src, sandbox);
-const { escapeHtml, safeUrl, linkifyIpsInEl } = sandbox.__h;
+const { escapeHtml, safeUrl, linkifyIpsInEl, parseUtc, ageHours } = sandbox.__h;
 
 let failures = 0;
 function check(name, fn) {
@@ -134,6 +134,20 @@ check("linkifyIpsInEl does not double-link inside an existing <a>", () => {
   // the anchor's text child stays a single text node — no nested anchor
   assert.equal(a.childNodes.length, 1);
   assert.equal(a.childNodes[0].nodeType, 3);
+});
+
+// ---- ageHours (B7: +00:00 offset must not become NaN) ---------------------
+check("ageHours handles Z / no-suffix / +00:00 without NaN", () => {
+  for (const s of ["2026-05-29T10:00:00", "2026-05-29T10:00:00Z", "2026-05-29T10:00:00+00:00"]) {
+    const h = ageHours(s);
+    assert.ok(Number.isFinite(h), `${s} -> ${h}`);
+  }
+  assert.equal(ageHours(""), 0);
+  assert.equal(ageHours(null), 0);
+});
+check("parseUtc treats a bare (no-zone) stamp as UTC", () => {
+  assert.equal(parseUtc("2026-05-29T10:00:00").getTime(),
+               Date.UTC(2026, 4, 29, 10, 0, 0));
 });
 
 if (failures) { console.error(`\n${failures} JS helper assertion(s) failed`); process.exit(1); }
