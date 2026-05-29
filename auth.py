@@ -31,7 +31,10 @@ import database as db
 
 log = logging.getLogger("soc.auth")
 
-_PBKDF2_ITERATIONS = 200_000
+# OWASP 2023 minimum for PBKDF2-HMAC-SHA256. Existing lower-iteration hashes
+# still verify (the count is encoded in each stored hash) and are transparently
+# upgraded to this on the user's next successful login — see needs_rehash().
+_PBKDF2_ITERATIONS = 600_000
 _PBKDF2_ALGO = "sha256"
 
 
@@ -60,6 +63,16 @@ def verify_password(password: str, stored: str) -> bool:
         h = hashlib.pbkdf2_hmac(_PBKDF2_ALGO, password.encode(), salt, iters_n)
         return hmac.compare_digest(h, expected)
     except (ValueError, TypeError):
+        return False
+
+
+def needs_rehash(stored: str) -> bool:
+    """True if a stored PBKDF2 hash uses fewer iterations than the current
+    target, so it should be transparently re-hashed on next successful login."""
+    try:
+        scheme, iters, _salt, _hash = stored.split("$", 3)
+        return scheme == "pbkdf2" and int(iters) < _PBKDF2_ITERATIONS
+    except (ValueError, TypeError, AttributeError):
         return False
 
 
@@ -343,6 +356,14 @@ def login_submit():
     row = db.get_user_by_username(username)
     if row and not row["disabled"] and verify_password(password, row["password_hash"]):
         login_record_success(ip, username)
+        # Transparently upgrade legacy / low-iteration hashes (no forced reset).
+        if needs_rehash(row["password_hash"]):
+            try:
+                db.update_user_password(row["id"], hash_password(password))
+                audit("user.password_rehash", "user", row["id"],
+                      {"iterations": _PBKDF2_ITERATIONS})
+            except Exception:  # noqa: BLE001
+                log.warning("password rehash failed for user %s", row["id"])
         session["user_id"] = row["id"]
         db.update_user_login(row["id"])
         audit("user.login", "user", row["id"])
