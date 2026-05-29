@@ -20,6 +20,8 @@ import hmac
 import logging
 import os
 import secrets
+import threading
+import time
 from typing import Any
 
 from flask import g, redirect, request, session, url_for
@@ -59,6 +61,62 @@ def verify_password(password: str, stored: str) -> bool:
         return hmac.compare_digest(h, expected)
     except (ValueError, TypeError):
         return False
+
+
+# ---------- login brute-force throttle ------------------------------------
+# In-process sliding-window limiter. The dashboard runs as a single waitress
+# process, so module-level state shared across worker threads is sufficient (it
+# resets on restart — an acceptable trade-off for a brute-force speed-bump).
+# A locked-out attempt is refused BEFORE the password is hashed, which also
+# blunts a hashing-CPU DoS via login spam. Tunable via env.
+_LOGIN_WINDOW_S     = int(os.environ.get("SOC_LOGIN_WINDOW_S", "900"))    # 15 min
+_LOGIN_MAX_PER_IP   = int(os.environ.get("SOC_LOGIN_MAX_PER_IP", "10"))
+_LOGIN_MAX_PER_USER = int(os.environ.get("SOC_LOGIN_MAX_PER_USER", "5"))
+_login_lock = threading.Lock()
+_login_fails: dict[str, list[float]] = {}   # key -> failure timestamps (monotonic)
+
+
+def _login_keys(ip: str | None, username: str) -> tuple[str, str]:
+    return f"ip:{ip or '?'}", f"user:{(username or '').strip().lower()}"
+
+
+def _login_prune(key: str, now: float) -> list[float]:
+    kept = [t for t in _login_fails.get(key, []) if now - t < _LOGIN_WINDOW_S]
+    if kept:
+        _login_fails[key] = kept
+    else:
+        _login_fails.pop(key, None)
+    return kept
+
+
+def login_throttle_check(ip: str | None, username: str) -> float:
+    """Seconds until this (ip, username) may try again, or 0.0 if not currently
+    locked out. Read-only — records nothing."""
+    now = time.monotonic()
+    ip_key, user_key = _login_keys(ip, username)
+    with _login_lock:
+        ip_times = _login_prune(ip_key, now)
+        user_times = _login_prune(user_key, now)
+        retry = 0.0
+        if len(ip_times) >= _LOGIN_MAX_PER_IP:
+            retry = max(retry, _LOGIN_WINDOW_S - (now - ip_times[0]))
+        if len(user_times) >= _LOGIN_MAX_PER_USER:
+            retry = max(retry, _LOGIN_WINDOW_S - (now - user_times[0]))
+        return max(0.0, retry)
+
+
+def login_record_failure(ip: str | None, username: str) -> None:
+    now = time.monotonic()
+    with _login_lock:
+        for key in _login_keys(ip, username):
+            _login_fails.setdefault(key, []).append(now)
+
+
+def login_record_success(ip: str | None, username: str) -> None:
+    """Clear the failure counters for this IP + username (called on success)."""
+    with _login_lock:
+        for key in _login_keys(ip, username):
+            _login_fails.pop(key, None)
 
 
 # ---------- Flask integration --------------------------------------------
@@ -270,8 +328,21 @@ def login_submit():
     username = (request.form.get("username") or "").strip()
     password = request.form.get("password") or ""
     next_path = request.form.get("next") or "/"
+    ip = request.remote_addr
+
+    # Brute-force throttle: refuse (without hashing) once too many recent
+    # failures are seen for this IP or username.
+    locked_for = login_throttle_check(ip, username)
+    if locked_for > 0:
+        mins = int(locked_for // 60) + 1
+        return render_template(
+            "login.html", theme=config.DEFAULT_THEME,
+            error=f"Too many failed attempts. Try again in ~{mins} min.",
+            next=next_path), 429
+
     row = db.get_user_by_username(username)
     if row and not row["disabled"] and verify_password(password, row["password_hash"]):
+        login_record_success(ip, username)
         session["user_id"] = row["id"]
         db.update_user_login(row["id"])
         audit("user.login", "user", row["id"])
@@ -279,6 +350,10 @@ def login_submit():
         if not next_path.startswith("/") or next_path.startswith("//"):
             next_path = "/"
         return redirect(next_path)
+
+    login_record_failure(ip, username)
+    audit("user.login_failed", "user", row["id"] if row else None,
+          {"username": username})
     return render_template(
         "login.html", theme=config.DEFAULT_THEME,
         error="Invalid username or password.", next=next_path), 401
