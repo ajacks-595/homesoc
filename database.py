@@ -557,6 +557,52 @@ def noisy_rules(days: int = 7, limit: int = 20) -> list[dict[str, Any]]:
     } for r in rows]
 
 
+def _parse_ts(s: Any) -> "datetime | None":
+    """Best-effort parse of a stored timestamp (handles both the 'T' and space
+    separators and any trailing offset) to a naive datetime for arithmetic."""
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(str(s).strip().replace(" ", "T")[:19])
+    except ValueError:
+        return None
+
+
+def soc_metrics(days: int = 7) -> dict[str, Any]:
+    """Analyst performance over the window: open backlog, triage volume,
+    mean-time-to-respond (alert timestamp → acked_at), false-positive rate, and
+    a per-day closed count. Derived from the alerts table (status + acked_at)."""
+    from collections import Counter
+    cutoff_sp = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+    status_counts: Counter = Counter()
+    per_day: Counter = Counter()
+    durations: list[float] = []
+    with conn() as c:
+        open_count = c.execute("SELECT COUNT(*) FROM alerts WHERE status='open'").fetchone()[0]
+        triaged = c.execute(
+            "SELECT status, timestamp, acked_at FROM alerts "
+            "WHERE acked_at IS NOT NULL AND acked_at >= ?", (cutoff_sp,)).fetchall()
+    for r in triaged:
+        status_counts[r["status"]] += 1
+        per_day[(r["acked_at"] or "")[:10]] += 1
+        ack, ts = _parse_ts(r["acked_at"]), _parse_ts(r["timestamp"])
+        if ack and ts:
+            h = (ack - ts).total_seconds() / 3600.0
+            if h >= 0:
+                durations.append(h)
+    total = sum(status_counts.values())
+    fp = status_counts.get("false_positive", 0)
+    return {
+        "days": days,
+        "open_alerts": int(open_count),
+        "triaged": total,
+        "by_status": dict(status_counts),
+        "false_positive_rate": round(100.0 * fp / total, 1) if total else 0.0,
+        "mttr_hours": round(sum(durations) / len(durations), 2) if durations else None,
+        "closed_per_day": [{"day": d, "count": per_day[d]} for d in sorted(per_day) if d],
+    }
+
+
 def latest_alerts(min_level: int = 7, limit: int = 10,
                   only_open: bool = True) -> list[sqlite3.Row]:
     with conn() as c:

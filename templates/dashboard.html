@@ -81,6 +81,18 @@
       </div>
     </div>
 
+    <div class="card">
+      <h2>SOC Performance <span class="muted small">(last 7 days)</span></h2>
+      <div class="card-row cols-2" style="margin-bottom:6px">
+        <div class="metric"><div class="label">Open Backlog</div><div class="value mono" id="soc-perf-open">—</div></div>
+        <div class="metric"><div class="label">MTTR (hrs)</div><div class="value mono" id="soc-perf-mttr">—</div></div>
+      </div>
+      <div class="card-row cols-2">
+        <div class="metric"><div class="label">Triaged</div><div class="value mono" id="soc-perf-triaged">—</div></div>
+        <div class="metric warn"><div class="label">FP Rate</div><div class="value mono" id="soc-perf-fp">—</div></div>
+      </div>
+    </div>
+
     <div class="card full">
       <h2>Alert Volume — Last 7 Days</h2>
       <div class="chart-wrap"><canvas id="chart-vol"></canvas></div>

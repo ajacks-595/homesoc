@@ -497,6 +497,12 @@ def mitre_overview():
     return ok(db.mitre_summary(days=int_arg("days", 7)))
 
 
+@api_bp.route("/metrics/soc")
+def soc_metrics_overview():
+    """Analyst performance metrics (MTTR, FP rate, triage volume) over N days."""
+    return ok(db.soc_metrics(days=int_arg("days", 7)))
+
+
 @api_bp.route("/alerts/export")
 def alerts_export():
     rows, _ = db.query_alerts(

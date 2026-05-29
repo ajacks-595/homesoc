@@ -348,7 +348,18 @@ const SOC = (() => {
   async function socViewActivate() {
     if (socActivated) { loadSocFeed(); return; }
     socActivated = true;
-    await Promise.all([loadSocFeed(), loadAgents(), loadSocDns(), loadCharts()]);
+    await Promise.all([loadSocFeed(), loadAgents(), loadSocDns(), loadCharts(), loadSocMetrics()]);
+  }
+
+  async function loadSocMetrics() {
+    const r = await api("/api/metrics/soc?days=7");
+    if (!r.success) return;
+    const d = r.data;
+    const set = (id, v) => { const e = document.getElementById(id); if (e) e.textContent = v; };
+    set("soc-perf-open", fmt.int(d.open_alerts));
+    set("soc-perf-mttr", d.mttr_hours == null ? "—" : d.mttr_hours.toFixed(1));
+    set("soc-perf-triaged", fmt.int(d.triaged));
+    set("soc-perf-fp", fmt.pct(d.false_positive_rate));
   }
 
   async function loadSocFeed() {
