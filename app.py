@@ -299,6 +299,7 @@ def alerts_query():
         min_level=int_arg("min_level"),
         group=request.args.get("group"),
         search=request.args.get("q"),
+        mitre=request.args.get("mitre"),
         statuses=statuses,
         limit=per_page,
         offset=(page - 1) * per_page,
@@ -488,6 +489,12 @@ def alert_related(aid: int):
     except json.JSONDecodeError:
         raw = {}
     return ok(ai.related_observations(aid, raw))
+
+
+@api_bp.route("/mitre/summary")
+def mitre_overview():
+    """MITRE ATT&CK tactic/technique counts over the last N days (default 7)."""
+    return ok(db.mitre_summary(days=int_arg("days", 7)))
 
 
 @api_bp.route("/alerts/export")

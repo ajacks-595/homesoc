@@ -8,6 +8,7 @@
   <div class="view-toggle" id="ti-tabs">
     <button data-tab="dns"   class="{% if tab == 'dns' %}active{% endif %}">DNS Deep Dive</button>
     <button data-tab="unifi" class="{% if tab == 'unifi' %}active{% endif %}">UniFi Firewall</button>
+    <button data-tab="mitre" class="{% if tab == 'mitre' %}active{% endif %}">MITRE ATT&amp;CK</button>
   </div>
 </div>
 
@@ -81,6 +82,28 @@
       <tbody></tbody>
     </table>
   </div>
+</div>
+<!-- ===== MITRE ATT&CK ===== -->
+<div id="ti-mitre" class="{% if tab != 'mitre' %}hidden{% endif %}">
+  <div class="muted small" id="mitre-meta" style="margin-bottom:8px">Loading ATT&amp;CK mapping…</div>
+  <div class="card-row cols-2">
+    <div class="card">
+      <h2>Tactics (last 7 days)</h2>
+      <table class="data" id="mitre-tactics">
+        <thead><tr><th>Tactic</th><th class="right">Alerts</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="card">
+      <h2>Techniques (last 7 days)</h2>
+      <table class="data" id="mitre-techniques">
+        <thead><tr><th>Technique</th><th class="right">Alerts</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+  <p class="muted small">Counts are derived from <code>rule.mitre</code> on stored Wazuh alerts.
+     Click a tactic or technique to filter the alert explorer.</p>
 </div>
 {% endblock %}
 

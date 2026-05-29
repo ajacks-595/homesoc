@@ -441,6 +441,7 @@ def query_alerts(*, date_from: str | None = None, date_to: str | None = None,
                  agent: str | None = None, rule_id: str | None = None,
                  min_level: int | None = None, group: str | None = None,
                  search: str | None = None,
+                 mitre: str | None = None,
                  statuses: list[str] | None = None,
                  limit: int = 50,
                  offset: int = 0,
@@ -469,6 +470,10 @@ def query_alerts(*, date_from: str | None = None, date_to: str | None = None,
     if group:
         q += " AND rule_groups LIKE ?"
         params.append(f"%\"{group}\"%")
+    if mitre:
+        # MITRE technique/tactic/id substring match against the stored raw alert.
+        q += " AND raw_json LIKE ?"
+        params.append(f"%{mitre}%")
     if search:
         q += " AND (full_log LIKE ? OR rule_description LIKE ? OR agent_name LIKE ?)"
         like = f"%{search}%"
@@ -484,6 +489,44 @@ def query_alerts(*, date_from: str | None = None, date_to: str | None = None,
         ).fetchall()
     rows = list(rows)
     return rows, (int(total) if with_total else len(rows))
+
+
+def mitre_summary(days: int = 7, limit: int = 3000) -> dict[str, Any]:
+    """Aggregate MITRE ATT&CK tactic/technique/id counts from recent alerts'
+    stored raw_json (rule.mitre). Bounded by a time window + a LIKE pre-filter
+    so only mitre-bearing alerts are parsed (no schema change / backfill)."""
+    from collections import Counter
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S")
+    tech: Counter = Counter()
+    tactic: Counter = Counter()
+    ids: Counter = Counter()
+    n = 0
+    with conn() as c:
+        rows = c.execute(
+            "SELECT raw_json FROM alerts WHERE timestamp >= ? AND raw_json LIKE '%\"mitre\"%' "
+            "ORDER BY timestamp DESC LIMIT ?", (cutoff, limit)).fetchall()
+    for r in rows:
+        try:
+            raw = json.loads(r["raw_json"] or "{}")
+        except json.JSONDecodeError:
+            continue
+        m = (raw.get("rule") or {}).get("mitre") or {}
+        if not isinstance(m, dict):
+            continue
+        n += 1
+        for t in (m.get("technique") or []):
+            tech[t] += 1
+        for t in (m.get("tactic") or []):
+            tactic[t] += 1
+        for i in (m.get("id") or []):
+            ids[i] += 1
+    return {
+        "days": days,
+        "alerts_with_mitre": n,
+        "tactics":    [{"name": k, "count": v} for k, v in tactic.most_common(20)],
+        "techniques": [{"name": k, "count": v} for k, v in tech.most_common(20)],
+        "ids":        [{"id": k, "count": v} for k, v in ids.most_common(30)],
+    }
 
 
 def latest_alerts(min_level: int = 7, limit: int = 10,

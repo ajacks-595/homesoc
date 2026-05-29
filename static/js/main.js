@@ -635,7 +635,7 @@ const SOC = (() => {
 
   // ===== ALERTS =============================================================
 
-  let alertsState = { page: 1, perPage: 50, filters: {}, focusId: null };
+  let alertsState = { page: 1, perPage: 50, filters: {}, focusId: null, mitre: null };
 
   async function initAlerts() {
     initThemePicker();
@@ -668,6 +668,7 @@ const SOC = (() => {
     // ?focus=<id> opens that alert at the top of the list, expanded
     const _focus = qp.get("focus") ? parseInt(qp.get("focus"), 10) : NaN;
     alertsState.focusId = Number.isInteger(_focus) ? _focus : null;
+    alertsState.mitre = qp.get("mitre") || null;
 
     await loadAlerts();
 
@@ -747,11 +748,13 @@ const SOC = (() => {
       per_page: alertsState.perPage,
       ...Object.fromEntries(filtered),
     });
+    if (alertsState.mitre) params.set("mitre", alertsState.mitre);
     const r = await api("/api/alerts?" + params.toString());
     if (!r.success) { toast(r.error, "danger"); return; }
     document.getElementById("alert-count-badge").textContent = fmt.int(r.data.total);
     document.getElementById("alerts-page-info").textContent =
-      `page ${r.data.page} · ${fmt.int(r.data.rows.length)} of ${fmt.int(r.data.total)}`;
+      `page ${r.data.page} · ${fmt.int(r.data.rows.length)} of ${fmt.int(r.data.total)}`
+      + (alertsState.mitre ? ` · ATT&CK: ${alertsState.mitre}` : "");
     const tbody = document.querySelector("#alerts-table tbody");
     tbody.innerHTML = "";
     const statusBadge = {
@@ -1638,16 +1641,43 @@ const SOC = (() => {
   async function initThreatIntel(tab) {
     initThemePicker();
     tiTab = tab || "dns";
-    document.querySelectorAll("#ti-tabs button").forEach(b => b.addEventListener("click", () => {
-      tiTab = b.dataset.tab;
+    const showTab = () => {
       document.querySelectorAll("#ti-tabs button").forEach(x => x.classList.toggle("active", x.dataset.tab === tiTab));
       document.getElementById("ti-dns").classList.toggle("hidden", tiTab !== "dns");
       document.getElementById("ti-unifi").classList.toggle("hidden", tiTab !== "unifi");
-      if (tiTab === "dns") loadDns(); else loadUnifi();
+      document.getElementById("ti-mitre")?.classList.toggle("hidden", tiTab !== "mitre");
+      if (tiTab === "dns") loadDns();
+      else if (tiTab === "unifi") loadUnifi();
+      else if (tiTab === "mitre") loadMitre();
+    };
+    document.querySelectorAll("#ti-tabs button").forEach(b => b.addEventListener("click", () => {
+      tiTab = b.dataset.tab;
+      showTab();
     }));
-    if (tiTab === "dns") loadDns(); else loadUnifi();
+    showTab();
     document.getElementById("dns-filter").addEventListener("change", renderDns);
     document.getElementById("dns-client").addEventListener("input", debounce(renderDns, 200));
+  }
+
+  async function loadMitre() {
+    const r = await api("/api/mitre/summary?days=7");
+    if (!r.success) return;
+    const d = r.data;
+    const meta = document.getElementById("mitre-meta");
+    if (meta) meta.textContent =
+      `${fmt.int(d.alerts_with_mitre)} alerts with ATT&CK mapping in the last ${d.days} days`;
+    const rowHtml = (label, count) =>
+      `<tr><td><a href="/alerts?mitre=${encodeURIComponent(label)}">${escapeHtml(label)}</a></td>
+           <td class="right mono">${fmt.int(count)}</td></tr>`;
+    const fill = (id, items) => {
+      const body = document.querySelector(`#${id} tbody`);
+      if (!body) return;
+      body.innerHTML = items.length
+        ? items.map(t => rowHtml(t.name, t.count)).join("")
+        : `<tr><td colspan="2" class="muted small">No ATT&CK data in window.</td></tr>`;
+    };
+    fill("mitre-tactics", d.tactics || []);
+    fill("mitre-techniques", d.techniques || []);
   }
 
   let dnsData = null;
