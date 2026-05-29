@@ -220,6 +220,19 @@ def _adguard_configured() -> bool:
     return bool(config.RUNTIPI_HOST and config.ADGUARD_QUERYLOG)
 
 
+def _iter_lines(raw: str):
+    """Yield lines from a large string one at a time, without building a full
+    splitlines() list (the AdGuard tail can be hundreds of MB)."""
+    start, n = 0, len(raw)
+    while start < n:
+        nl = raw.find("\n", start)
+        if nl == -1:
+            yield raw[start:]
+            return
+        yield raw[start:nl]
+        start = nl + 1
+
+
 def _fetch_adguard_tail(max_bytes: int = 60 * 1024 * 1024) -> str:
     """Return the recent tail of AdGuard's querylog.json from runtipi.
 
@@ -260,9 +273,9 @@ def sync_dns_today(day: str | None = None) -> dict[str, object]:
     except Exception as e:  # noqa: BLE001
         log.warning("dns sync failed: %s", e)
         return {"error": str(e)}
-    parsed = parsers.parse_adguard_lines(raw.splitlines())
     hostname_lookup = {h["ip"]: h["hostname"] or "" for h in db.list_hosts()}
-    stats = parsers.summarise_dns(parsed, day, hostname_lookup)
+    entries = parsers.iter_adguard_lines(_iter_lines(raw))
+    stats = parsers.summarise_dns_days(entries, [day], hostname_lookup)[day]
     db.dns_save_daily(day, stats)
     return {"day": day, "queries": stats["total_queries"],
             "blocked": stats["blocked_queries"]}
@@ -279,13 +292,16 @@ def sync_dns_last_n(n: int = 7) -> list[dict[str, object]]:
     except Exception as e:  # noqa: BLE001
         log.warning("dns sync failed: %s", e)
         return [{"error": str(e)}]
-    parsed = parsers.parse_adguard_lines(raw.splitlines())
     hostname_lookup = {h["ip"]: h["hostname"] or "" for h in db.list_hosts()}
-    out: list[dict[str, object]] = []
     today = datetime.utcnow().date()
-    for i in range(n):
-        d = (today - timedelta(days=i)).strftime("%Y-%m-%d")
-        stats = parsers.summarise_dns(parsed, d, hostname_lookup)
+    days = [(today - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(n)]
+    # Single pass over the (streamed) tail, bucketed into all N days at once —
+    # was N full re-scans of a fully-materialized list.
+    by_day = parsers.summarise_dns_days(
+        parsers.iter_adguard_lines(_iter_lines(raw)), days, hostname_lookup)
+    out: list[dict[str, object]] = []
+    for d in days:
+        stats = by_day[d]
         db.dns_save_daily(d, stats)
         out.append({"day": d, "queries": stats["total_queries"],
                     "blocked": stats["blocked_queries"]})

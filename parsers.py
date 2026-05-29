@@ -8,7 +8,7 @@ import re
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
 
 
 # ---------- briefings -------------------------------------------------------
@@ -149,8 +149,12 @@ def parse_wazuh_alerts_stream(text: str) -> list[dict[str, Any]]:
 
 # ---------- adguard querylog -----------------------------------------------
 
-def parse_adguard_lines(lines: Iterable[str]) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
+def iter_adguard_lines(lines: Iterable[str]) -> Iterator[dict[str, Any]]:
+    """Stream parsed AdGuard querylog entries from an iterable of JSON lines.
+
+    A generator: entries are yielded one at a time, so a multi-hundred-MB tail
+    never materializes as a full list of dicts. Feed it a lazy line iterator
+    (see sync._iter_lines) to keep peak memory to ~one line + the aggregator."""
     for line in lines:
         line = line.strip()
         if not line:
@@ -160,66 +164,95 @@ def parse_adguard_lines(lines: Iterable[str]) -> list[dict[str, Any]]:
         except json.JSONDecodeError:
             continue
         result = q.get("Result") or {}
-        out.append({
+        yield {
             "ts": q.get("T", "")[:19],
             "qh": q.get("QH"),
             "qt": q.get("QT"),
             "client": q.get("IP"),
             "blocked": bool(result.get("IsFiltered")),
             "elapsed_us": (q.get("Elapsed") or 0) // 1000,
-        })
-    return out
+        }
 
 
-def summarise_dns(queries: list[dict[str, Any]],
-                  day: str,
-                  hostname_lookup: dict[str, str] | None = None) -> dict[str, Any]:
-    """Build a DNS daily summary from parsed querylog entries."""
-    same_day = [q for q in queries if q["ts"].startswith(day)]
-    total = len(same_day)
-    blocked = sum(1 for q in same_day if q["blocked"])
+def parse_adguard_lines(lines: Iterable[str]) -> list[dict[str, Any]]:
+    """Eager list form of iter_adguard_lines (for callers/tests that re-iterate
+    or index the result)."""
+    return list(iter_adguard_lines(lines))
 
-    top_q = Counter(q["qh"] for q in same_day if q["qh"])
-    top_b = Counter(q["qh"] for q in same_day if q["blocked"] and q["qh"])
-    per_client_counter: Counter[str] = Counter()
-    per_client_blocked: Counter[str] = Counter()
-    for q in same_day:
-        if not q["client"]:
+
+def summarise_dns_days(entries: Iterable[dict[str, Any]],
+                       days: Iterable[str],
+                       hostname_lookup: dict[str, str] | None = None
+                       ) -> dict[str, dict[str, Any]]:
+    """Build DNS daily summaries for several days in a SINGLE pass over
+    `entries` (which may be a generator). Returns {day: summary}; every
+    requested day is present, with zeroed stats if it had no queries.
+
+    Replaces the old N-passes-over-the-full-list approach used to rebuild a
+    week of stats."""
+    wanted = set(days)
+    hostname_lookup = hostname_lookup or {}
+    acc: dict[str, dict[str, Any]] = {d: {
+        "total": 0, "blocked": 0,
+        "top_q": Counter(), "top_b": Counter(),
+        "pc": Counter(), "pcb": Counter(),
+        "hourly": defaultdict(lambda: {"queries": 0, "blocked": 0}),
+    } for d in wanted}
+
+    for q in entries:
+        a = acc.get(q["ts"][:10])
+        if a is None:
             continue
-        per_client_counter[q["client"]] += 1
-        if q["blocked"]:
-            per_client_blocked[q["client"]] += 1
-
-    per_client = []
-    for client, n in per_client_counter.most_common(50):
-        per_client.append({
-            "client": client,
-            "hostname": (hostname_lookup or {}).get(client, ""),
-            "queries": n,
-            "blocked": per_client_blocked[client],
-        })
-
-    hourly: dict[int, dict[str, int]] = defaultdict(lambda: {"queries": 0, "blocked": 0})
-    for q in same_day:
+        blk = q["blocked"]
+        a["total"] += 1
+        if blk:
+            a["blocked"] += 1
+        qh = q["qh"]
+        if qh:
+            a["top_q"][qh] += 1
+            if blk:
+                a["top_b"][qh] += 1
+        client = q["client"]
+        if client:
+            a["pc"][client] += 1
+            if blk:
+                a["pcb"][client] += 1
         ts = q["ts"]
         if len(ts) >= 13:
             try:
                 hour = int(ts[11:13])
             except ValueError:
-                continue
-            hourly[hour]["queries"] += 1
-            if q["blocked"]:
-                hourly[hour]["blocked"] += 1
-    hourly_list = [{"hour": h, **hourly[h]} for h in sorted(hourly)]
+                hour = None
+            if hour is not None:
+                a["hourly"][hour]["queries"] += 1
+                if blk:
+                    a["hourly"][hour]["blocked"] += 1
 
-    return {
-        "total_queries":   total,
-        "blocked_queries": blocked,
-        "top_queried":     [{"domain": d, "count": n} for d, n in top_q.most_common(20)],
-        "top_blocked":     [{"domain": d, "count": n} for d, n in top_b.most_common(20)],
-        "per_client":      per_client,
-        "hourly":          hourly_list,
-    }
+    out: dict[str, dict[str, Any]] = {}
+    for d, a in acc.items():
+        per_client = [{
+            "client":   c,
+            "hostname": hostname_lookup.get(c, ""),
+            "queries":  n,
+            "blocked":  a["pcb"][c],
+        } for c, n in a["pc"].most_common(50)]
+        hourly_list = [{"hour": h, **a["hourly"][h]} for h in sorted(a["hourly"])]
+        out[d] = {
+            "total_queries":   a["total"],
+            "blocked_queries": a["blocked"],
+            "top_queried":     [{"domain": dd, "count": n} for dd, n in a["top_q"].most_common(20)],
+            "top_blocked":     [{"domain": dd, "count": n} for dd, n in a["top_b"].most_common(20)],
+            "per_client":      per_client,
+            "hourly":          hourly_list,
+        }
+    return out
+
+
+def summarise_dns(queries: Iterable[dict[str, Any]],
+                  day: str,
+                  hostname_lookup: dict[str, str] | None = None) -> dict[str, Any]:
+    """Single-day DNS summary (delegates to the single-pass summarise_dns_days)."""
+    return summarise_dns_days(queries, [day], hostname_lookup)[day]
 
 
 # ---------- network context (context.md → hosts) ---------------------------
