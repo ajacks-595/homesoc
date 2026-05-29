@@ -621,6 +621,30 @@ def notification_recent(webhook_id: int, rule_id: str, agent_name: str | None,
         return int(c.execute(q, params).fetchone()[0])
 
 
+def notification_suppressed_since_last_send(webhook_id: int, rule_id: str,
+                                            agent_name: str | None) -> int:
+    """How many notifications for (webhook, rule, agent) were dedup-suppressed
+    since the last successful send. Used to roll that count into the next send
+    ("this rule fired N more times"). Keyed on the monotonic row id, not sent_at
+    (which is only second-resolution and would miss a same-second burst)."""
+    agent_clause = "agent_name=?" if agent_name else "agent_name IS NULL"
+    base: list[Any] = [webhook_id, rule_id]
+    if agent_name:
+        base.append(agent_name)
+    with conn() as c:
+        last_id = c.execute(
+            f"""SELECT COALESCE(MAX(id), 0) FROM notification_log
+                WHERE webhook_id=? AND rule_id=? AND {agent_clause} AND success=1""",
+            base,
+        ).fetchone()[0]
+        return int(c.execute(
+            f"""SELECT COUNT(*) FROM notification_log
+                WHERE webhook_id=? AND rule_id=? AND {agent_clause}
+                  AND skipped_reason='dedup' AND id > ?""",
+            base + [last_id],
+        ).fetchone()[0])
+
+
 def notification_log_add(webhook_id: int, alert_id: int | None,
                          rule_id: str | None, agent_name: str | None,
                          success: bool, response: str | None,

@@ -249,15 +249,20 @@ def deliver_alert(alert: dict[str, Any],
                         "previous_in_window": dedup_count_seen})
             continue
 
+        # Roll up how many times this rule fired (and was suppressed) since we
+        # last actually notified this webhook — makes the formatters' "fired N
+        # more times" line accurate instead of always 0.
+        rollup = db.notification_suppressed_since_last_send(wid, rule_id, agent)
         summary = ai_summary if w["include_ai"] else None
-        ok, resp = send_to_webhook(w, alert, summary, dedup_count=0)
+        ok, resp = send_to_webhook(w, alert, summary, dedup_count=rollup)
         db.notification_log_add(
             wid, alert.get("id"), rule_id, agent,
             success=ok, response=resp)
         db.update_webhook(
             wid, last_used_at=__import__("datetime").datetime.utcnow().isoformat(timespec="seconds"),
             last_error=None if ok else resp[:500])
-        out.append({"webhook": wid, "sent": ok, "response": resp})
+        out.append({"webhook": wid, "sent": ok, "response": resp,
+                    "rolled_up": rollup})
 
     return out
 
