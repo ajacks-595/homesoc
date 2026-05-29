@@ -616,6 +616,12 @@ def fp_list():
     return ok([row_to_dict(r) for r in rows])
 
 
+@api_bp.route("/fp/noisy-rules")
+def fp_noisy_rules():
+    """Noisiest rules over the window — FP-suppression candidates."""
+    return ok(db.noisy_rules(days=int_arg("days", 7), limit=int_arg("limit", 20)))
+
+
 @api_bp.route("/fp/rules-xml")
 def fp_rules_xml():
     try:

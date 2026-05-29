@@ -1258,7 +1258,30 @@ const SOC = (() => {
 
   async function initFp() {
     initThemePicker();
-    await loadFps();
+    await Promise.all([loadFps(), loadNoisyRules()]);
+  }
+
+  async function loadNoisyRules() {
+    const r = await api("/api/fp/noisy-rules?days=7&limit=20");
+    const tbody = document.querySelector("#noisy-rules tbody");
+    if (!tbody) return;
+    if (!r.success || !r.data.length) {
+      tbody.innerHTML = `<tr><td colspan="5" class="muted small">${
+        r.success ? "No alerts in the last 7 days." : "—"}</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = r.data.map(x =>
+      `<tr>
+         <td class="mono"><a href="/alerts?rule_id=${encodeURIComponent(x.rule_id)}">${escapeHtml(x.rule_id)}</a></td>
+         <td class="mono">${escapeHtml(x.level)}</td>
+         <td>${escapeHtml(fmt.short(x.description || "", 70))}</td>
+         <td class="right mono">${fmt.int(x.count)}</td>
+         <td>${x.suppressed
+            ? '<span class="badge muted">suppressed</span>'
+            : `<button class="ghost small" data-suppress="${escapeHtml(x.rule_id)}">Suppress</button>`}</td>
+       </tr>`).join("");
+    tbody.querySelectorAll("[data-suppress]").forEach(b =>
+      b.addEventListener("click", () => fpOpenAdd(b.dataset.suppress)));
   }
 
   async function loadFps() {
@@ -1302,7 +1325,7 @@ const SOC = (() => {
 
   function fpRefresh() { loadFps(); }
 
-  function fpOpenAdd() {
+  function fpOpenAdd(ruleId) {
     const html = `
       <h2>Add Suppression</h2>
       <div class="flex-col">
@@ -1346,6 +1369,10 @@ const SOC = (() => {
       ["fp-rid","fp-agent","fp-desc"].forEach(id => {
         document.getElementById(id).addEventListener("input", debouncedLookup);
       });
+      if (ruleId) {                       // pre-fill from the noisy-rules table
+        document.getElementById("fp-rid").value = ruleId;
+        fpLookupAndPreview();
+      }
     }});
   }
 
@@ -1387,7 +1414,7 @@ const SOC = (() => {
     });
     if (r.success) {
       toast("Suppression applied. Wazuh restarted.", "info");
-      closeModal(); loadFps();
+      closeModal(); loadFps(); loadNoisyRules();
     } else { toast("Failed: " + r.error, "danger"); }
   }
 
@@ -1400,7 +1427,7 @@ const SOC = (() => {
       toast("This suppression isn't tracked in DB — manual edit required.", "warn");
       return;
     }
-    if (r.success) { toast("Deleted.", "info"); loadFps(); }
+    if (r.success) { toast("Deleted.", "info"); loadFps(); loadNoisyRules(); }
     else { toast("Delete failed: " + r.error, "danger"); }
   }
 

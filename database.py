@@ -529,6 +529,34 @@ def mitre_summary(days: int = 7, limit: int = 3000) -> dict[str, Any]:
     }
 
 
+def noisy_rules(days: int = 7, limit: int = 20) -> list[dict[str, Any]]:
+    """Top alert-generating rules over the window — candidates for FP
+    suppression. Each row is flagged if it's already suppressed."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S")
+    with conn() as c:
+        suppressed = {row["rule_id"] for row in
+                      c.execute("SELECT rule_id FROM false_positives").fetchall()}
+        rows = c.execute(
+            """SELECT rule_id,
+                      COUNT(*)              AS cnt,
+                      MAX(rule_level)       AS level,
+                      MAX(rule_description) AS description
+               FROM alerts
+               WHERE timestamp >= ? AND rule_id != ''
+               GROUP BY rule_id
+               ORDER BY cnt DESC
+               LIMIT ?""",
+            (cutoff, limit),
+        ).fetchall()
+    return [{
+        "rule_id":     r["rule_id"],
+        "count":       int(r["cnt"]),
+        "level":       r["level"],
+        "description": r["description"],
+        "suppressed":  r["rule_id"] in suppressed,
+    } for r in rows]
+
+
 def latest_alerts(min_level: int = 7, limit: int = 10,
                   only_open: bool = True) -> list[sqlite3.Row]:
     with conn() as c:
