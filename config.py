@@ -42,9 +42,19 @@ def _machine_id() -> str:
     return socket.gethostname() + "-no-machine-id"
 
 
+_fernet_cache: Fernet | None = None
+
+
 def fernet() -> Fernet:
-    raw = pbkdf2_hmac("sha256", _machine_id().encode(), _FERNET_SALT, 200_000, 32)
-    return Fernet(base64.urlsafe_b64encode(raw))
+    # The derived key depends only on /etc/machine-id + the (env-fixed) salt,
+    # both constant for the process lifetime, so derive once and cache. Avoids
+    # re-running a 200k-iteration PBKDF2 on every encrypt/decrypt (e.g. once per
+    # webhook on each /api/webhooks load).
+    global _fernet_cache
+    if _fernet_cache is None:
+        raw = pbkdf2_hmac("sha256", _machine_id().encode(), _FERNET_SALT, 200_000, 32)
+        _fernet_cache = Fernet(base64.urlsafe_b64encode(raw))
+    return _fernet_cache
 
 
 def encrypt(plaintext: str) -> str:
