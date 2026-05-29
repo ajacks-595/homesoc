@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import os as _os
+import queue
 import threading
 import time
 from datetime import datetime, timedelta
@@ -123,7 +124,7 @@ def sync_recent_alerts(max_bytes: int = 8 * 1024 * 1024,
     n = db.insert_alerts_bulk(parsed)
 
     if dispatch_notifications and new_wazuh_ids:
-        _dispatch_new_alerts(new_wazuh_ids)
+        _enqueue_dispatch(new_wazuh_ids)
 
     return {"fetched": len(parsed), "inserted": n,
             "dispatched": len(new_wazuh_ids) if dispatch_notifications else 0}
@@ -184,6 +185,50 @@ def _dispatch_new_alerts(new_wazuh_ids: set[str]) -> None:
                           alert["id"], e)
 
 
+# ---------- dispatch worker -----------------------------------------------
+# AI enrichment is a ~30-60s Claude call per Level-10+ alert (up to the daily
+# cap). Running that inline in the alerts poller would block ingestion + webhook
+# delivery for minutes during a burst. Instead the poller hands new-alert ids to
+# this single background worker and returns immediately.
+
+_dispatch_q: "queue.Queue" = queue.Queue()
+_dispatch_worker_thread: threading.Thread | None = None
+
+
+def _dispatch_worker_loop() -> None:
+    while True:
+        ids = _dispatch_q.get()
+        try:
+            if ids is None:           # sentinel → stop (used by tests)
+                return
+            _dispatch_new_alerts(ids)
+        except Exception:  # noqa: BLE001
+            log.exception("dispatch worker failed for batch")
+        finally:
+            _dispatch_q.task_done()
+
+
+def _start_dispatch_worker() -> None:
+    """Start the background dispatch worker (idempotent)."""
+    global _dispatch_worker_thread
+    if _dispatch_worker_thread and _dispatch_worker_thread.is_alive():
+        return
+    _dispatch_worker_thread = threading.Thread(
+        target=_dispatch_worker_loop, daemon=True, name="dispatch-worker")
+    _dispatch_worker_thread.start()
+
+
+def _enqueue_dispatch(new_wazuh_ids: set[str]) -> None:
+    """Hand new-alert enrichment + webhook delivery to the background worker so
+    the caller (alerts poller / sync route) returns immediately. Falls back to
+    synchronous dispatch when no worker is running — e.g. the systemd one-shot
+    mode, a short-lived process where a background thread would never run."""
+    if not new_wazuh_ids:
+        return
+    if _dispatch_worker_thread and _dispatch_worker_thread.is_alive():
+        _dispatch_q.put(set(new_wazuh_ids))
+    else:
+        _dispatch_new_alerts(new_wazuh_ids)
 
 
 def sync_agent_status() -> int:
@@ -368,6 +413,9 @@ def start_background_pollers() -> None:
     if _pollers_started:
         return
     _pollers_started = True
+
+    # Background worker that drains AI-enrichment + delivery off the poller path.
+    _start_dispatch_worker()
 
     # Stagger initial fires by a few seconds so we don't hammer the network at boot.
     def delayed(delay_s: int, name: str, interval_s: int, fn):
