@@ -5,7 +5,7 @@ import json
 import os
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
@@ -506,7 +506,7 @@ def alerts_for_host(ip_or_name: str, limit: int = 20) -> list[sqlite3.Row]:
 
 def alert_stats_7d() -> dict[str, Any]:
     """Daily counts, severity distribution, top rules — last 7 days."""
-    cutoff = (datetime.utcnow() - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%S")
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%S")
     with conn() as c:
         by_day = c.execute(
             """SELECT substr(timestamp,1,10) AS day, COUNT(*) AS n
@@ -528,7 +528,7 @@ def alert_stats_7d() -> dict[str, Any]:
 
 
 def alerts_today_count() -> int:
-    today = datetime.utcnow().strftime("%Y-%m-%d")
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     with conn() as c:
         return int(c.execute(
             "SELECT COUNT(*) FROM alerts WHERE timestamp LIKE ?", (f"{today}%",)
@@ -976,7 +976,7 @@ def osint_get(ioc_value: str, source: str) -> sqlite3.Row | None:
 
 def osint_put(ioc_value: str, ioc_type: str, source: str, result: dict[str, Any],
               ttl_days: int = 7) -> None:
-    expires = (datetime.utcnow() + timedelta(days=ttl_days)).strftime("%Y-%m-%d %H:%M:%S")
+    expires = (datetime.now(timezone.utc) + timedelta(days=ttl_days)).strftime("%Y-%m-%d %H:%M:%S")
     with conn() as c:
         c.execute(
             """INSERT INTO osint_results(ioc_value,ioc_type,source,result_json,expires_at)
@@ -1051,7 +1051,7 @@ def update_host_agent(ip: str, agent_id: str | None, status: str | None,
 
 
 def refresh_host_alert_counts() -> None:
-    cutoff = (datetime.utcnow() - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%S")
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%S")
     with conn() as c:
         c.execute(
             """UPDATE hosts SET alert_count_7d = (
@@ -1166,7 +1166,7 @@ def dns_get_daily(date: str) -> dict[str, Any] | None:
 
 
 def dns_last_n_days(n: int = 7) -> list[dict[str, Any]]:
-    cutoff = (datetime.utcnow() - timedelta(days=n)).strftime("%Y-%m-%d")
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=n)).strftime("%Y-%m-%d")
     with conn() as c:
         rows = c.execute(
             "SELECT date,total_queries,blocked_queries FROM dns_daily_stats WHERE date >= ? ORDER BY date",
@@ -1180,7 +1180,7 @@ def pipeline_start(kind: str) -> int:
     with conn() as c:
         cur = c.execute(
             "INSERT INTO pipeline_runs(kind,started_at) VALUES(?,?)",
-            (kind, datetime.utcnow().isoformat(timespec="seconds")),
+            (kind, datetime.now(timezone.utc).isoformat(timespec="seconds")),
         )
         return int(cur.lastrowid or 0)
 
@@ -1190,7 +1190,7 @@ def pipeline_finish(run_id: int, success: bool, output: str,
     with conn() as c:
         c.execute(
             "UPDATE pipeline_runs SET finished_at=?, success=?, output=?, briefing_size=? WHERE id=?",
-            (datetime.utcnow().isoformat(timespec="seconds"),
+            (datetime.now(timezone.utc).isoformat(timespec="seconds"),
              1 if success else 0, output[-8000:] if output else None,
              briefing_size, run_id),
         )

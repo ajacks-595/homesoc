@@ -153,8 +153,8 @@ def _related_observations(alert_id: int, alert_raw: dict[str, Any],
     seen = 0
     with db.conn() as c:
         # Other Wazuh alerts referencing these IOCs (last 24h)
-        from datetime import datetime as _dt, timedelta as _td
-        cutoff = (_dt.utcnow() - _td(hours=24)).strftime("%Y-%m-%dT%H:%M:%S")
+        from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+        cutoff = (_dt.now(_tz.utc) - _td(hours=24)).strftime("%Y-%m-%dT%H:%M:%S")
         for ioc in list(flat_iocs)[:10]:    # cap how many IOCs we probe
             if seen >= max_items:
                 break
@@ -176,7 +176,7 @@ def _related_observations(alert_id: int, alert_raw: dict[str, Any],
                 seen += 1
 
     # DNS activity from today's snapshot
-    today = __import__("datetime").datetime.utcnow().strftime("%Y-%m-%d")
+    today = _dt.now(_tz.utc).strftime("%Y-%m-%d")
     dns = db.dns_get_daily(today) or {}
     top_blocked = {d["domain"]: d["count"] for d in dns.get("top_blocked", [])}
     top_queried = {d["domain"]: d["count"] for d in dns.get("top_queried", [])}

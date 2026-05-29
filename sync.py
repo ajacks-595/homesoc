@@ -8,7 +8,7 @@ import os as _os
 import queue
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import config
@@ -309,7 +309,7 @@ def _fetch_adguard_tail(max_bytes: int = 60 * 1024 * 1024) -> str:
 
 
 def sync_dns_today(day: str | None = None) -> dict[str, object]:
-    day = day or datetime.utcnow().strftime("%Y-%m-%d")
+    day = day or datetime.now(timezone.utc).strftime("%Y-%m-%d")
     if not _adguard_configured():
         return {"skipped": "AdGuard host not configured"}
     try:
@@ -339,7 +339,7 @@ def sync_dns_last_n(n: int = 7) -> list[dict[str, object]]:
         log.warning("dns sync failed: %s", e)
         return [{"error": str(e)}]
     hostname_lookup = {h["ip"]: h["hostname"] or "" for h in db.list_hosts()}
-    today = datetime.utcnow().date()
+    today = datetime.now(timezone.utc).date()
     days = [(today - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(n)]
     # Single pass over the (streamed) tail, bucketed into all N days at once —
     # was N full re-scans of a fully-materialized list.
@@ -410,7 +410,7 @@ def _poller_loop(name: str, interval_s: int, fn) -> None:
             with _poller_lock:
                 _poller_state[name]["last_error"] = str(e)
         with _poller_lock:
-            _poller_state[name]["last_run"] = datetime.utcnow().isoformat(timespec="seconds")
+            _poller_state[name]["last_run"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         time.sleep(interval_s)
 
 

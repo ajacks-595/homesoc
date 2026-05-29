@@ -8,7 +8,7 @@ import logging
 import os
 import re
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import markdown as md_lib
@@ -212,7 +212,7 @@ api_bp = Blueprint("api", __name__, url_prefix="/api")
 @api_bp.route("/dashboard/metrics")
 def metrics():
     alerts_today = db.alerts_today_count()
-    today = datetime.utcnow().strftime("%Y-%m-%d")
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     dns = db.dns_get_daily(today) or {"total_queries": 0, "blocked_queries": 0}
     block_rate = (
         round(100.0 * dns["blocked_queries"] / dns["total_queries"], 1)
@@ -225,7 +225,7 @@ def metrics():
     # Level-10+ open alerts in last 24h — surfaced as a banner on the dashboard.
     # Any alert that's been triaged (in_progress / resolved / fp / acked) is
     # off the queue and shouldn't re-appear here.
-    cutoff = (datetime.utcnow() - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%S")
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%S")
     with db.conn() as c:
         crit_rows = c.execute(
             """SELECT id, timestamp, agent_name, rule_id, rule_level, rule_description
@@ -251,7 +251,7 @@ def metrics():
 @api_bp.route("/dashboard/summary")
 def todays_summary():
     """Executive summary section pulled from today's briefing (or latest)."""
-    today = datetime.utcnow().strftime("%Y-%m-%d")
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     row = db.get_briefing_by_date(today, "daily") or db.latest_briefing("daily")
     if not row:
         return ok({"html": "<p><em>No briefing available yet.</em></p>",
@@ -501,7 +501,7 @@ def alerts_export():
     return send_file(
         io.BytesIO(data), mimetype="text/csv",
         as_attachment=True,
-        download_name=f"alerts-{datetime.utcnow():%Y%m%d-%H%M%S}.csv",
+        download_name=f"alerts-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}.csv",
     )
 
 
@@ -802,7 +802,7 @@ def hosts_refresh():
 
 @api_bp.route("/dns/today")
 def dns_today():
-    today = datetime.utcnow().strftime("%Y-%m-%d")
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     data = db.dns_get_daily(today)
     if data:
         return ok(data)
@@ -840,7 +840,7 @@ def unifi_recent():
 @api_bp.route("/unifi/top-sources")
 def unifi_top_sources():
     """Try to extract source IPs from full_log for the past 7 days."""
-    cutoff = (datetime.utcnow() - timedelta(days=7)).strftime("%Y-%m-%d")
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
     src_re = re.compile(r"\bsrc=([0-9]{1,3}(?:\.[0-9]{1,3}){3})|\bSRC=([0-9.]+)|"
                         r"\bfrom\s+([0-9]{1,3}(?:\.[0-9]{1,3}){3})")
     counts: dict[str, int] = {}
@@ -1078,7 +1078,7 @@ def home_events():
                 "SELECT id FROM alerts WHERE rule_level >= 12 AND status='open'"
             ))
 
-        yield f"event: hello\ndata: {{\"as_of\": \"{_dt.utcnow().isoformat()}Z\"}}\n\n"
+        yield f"event: hello\ndata: {{\"as_of\": \"{_dt.now(timezone.utc).isoformat()}\"}}\n\n"
         last_heartbeat = _t.monotonic()
 
         while True:
@@ -1152,7 +1152,7 @@ def home_events():
 
                 # Heartbeat
                 if _t.monotonic() - last_heartbeat > 25:
-                    yield f"event: heartbeat\ndata: {{\"as_of\": \"{_dt.utcnow().isoformat()}Z\"}}\n\n"
+                    yield f"event: heartbeat\ndata: {{\"as_of\": \"{_dt.now(timezone.utc).isoformat()}\"}}\n\n"
                     last_heartbeat = _t.monotonic()
             except GeneratorExit:
                 return

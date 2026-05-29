@@ -16,7 +16,7 @@ import shutil
 import sqlite3
 import subprocess
 import tempfile
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
@@ -76,7 +76,7 @@ def snapshot_config(dest_path: str) -> int:
 
 
 def make_filename(kind: str) -> str:
-    stamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     return f"soc-dashboard-{kind}-{stamp}.sqlite"
 
 

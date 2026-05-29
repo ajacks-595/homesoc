@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import socket
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
 
@@ -259,7 +260,7 @@ def deliver_alert(alert: dict[str, Any],
             wid, alert.get("id"), rule_id, agent,
             success=ok, response=resp)
         db.update_webhook(
-            wid, last_used_at=__import__("datetime").datetime.utcnow().isoformat(timespec="seconds"),
+            wid, last_used_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
             last_error=None if ok else resp[:500])
         out.append({"webhook": wid, "sent": ok, "response": resp,
                     "rolled_up": rollup})
@@ -275,7 +276,7 @@ def test_webhook(webhook_row) -> tuple[bool, str]:
         "rule_level": 10,
         "rule_description": "Test alert from HomeSOC — webhook configuration check",
         "agent_name": "soc-dashboard",
-        "timestamp": __import__("datetime").datetime.utcnow().isoformat(timespec="seconds"),
+        "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "location": "test",
     }
     return send_to_webhook(webhook_row, sample,

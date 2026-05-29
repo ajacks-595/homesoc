@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 import re
 import subprocess
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import defusedxml.ElementTree as DET  # safe XML parsing (no entity expansion)
@@ -216,7 +216,7 @@ def list_agents() -> list[dict[str, Any]]:
             "ip":     m.group("ip").strip(),
             "status": norm,
             "raw_status": status,
-            "last_seen": datetime.utcnow().isoformat(timespec="seconds"),
+            "last_seen": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         })
     return out
 
