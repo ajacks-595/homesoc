@@ -451,6 +451,7 @@ def alerts_export():
         group=request.args.get("group"),
         search=request.args.get("q"),
         limit=10000,
+        with_total=False,   # CSV export discards the total → skip the COUNT scan
     )
     buf = io.StringIO()
     w = csv.writer(buf)

@@ -431,7 +431,8 @@ def query_alerts(*, date_from: str | None = None, date_to: str | None = None,
                  search: str | None = None,
                  statuses: list[str] | None = None,
                  limit: int = 50,
-                 offset: int = 0) -> tuple[list[sqlite3.Row], int]:
+                 offset: int = 0,
+                 with_total: bool = True) -> tuple[list[sqlite3.Row], int]:
     q = "FROM alerts WHERE 1=1"
     params: list[Any] = []
     if statuses:
@@ -461,12 +462,16 @@ def query_alerts(*, date_from: str | None = None, date_to: str | None = None,
         like = f"%{search}%"
         params.extend([like, like, like])
     with conn() as c:
-        total = c.execute("SELECT COUNT(*) " + q, params).fetchone()[0]
+        # Skip the extra full-predicate COUNT pass when the caller discards the
+        # total (e.g. CSV export) — with the leading-% LIKE search that COUNT is
+        # an unindexable second scan.
+        total = c.execute("SELECT COUNT(*) " + q, params).fetchone()[0] if with_total else None
         rows = c.execute(
             "SELECT * " + q + " ORDER BY timestamp DESC LIMIT ? OFFSET ?",
             params + [limit, offset],
         ).fetchall()
-    return list(rows), int(total)
+    rows = list(rows)
+    return rows, (int(total) if with_total else len(rows))
 
 
 def latest_alerts(min_level: int = 7, limit: int = 10,
@@ -849,17 +854,17 @@ def delete_fp(fp_id: int) -> None:
 
 
 def refresh_fp_alert_counts() -> None:
-    """Update alert_count for each FP based on alerts table."""
+    """Update alert_count for every FP from the alerts table in a single
+    correlated UPDATE (was an N+1 loop of COUNT + UPDATE per FP). A NULL
+    agent_name on the FP means 'all agents'."""
     with conn() as c:
-        fps = c.execute("SELECT id, rule_id, agent_name FROM false_positives").fetchall()
-        for fp in fps:
-            q = "SELECT COUNT(*) FROM alerts WHERE rule_id=?"
-            params: list[Any] = [fp["rule_id"]]
-            if fp["agent_name"]:
-                q += " AND agent_name=?"
-                params.append(fp["agent_name"])
-            n = c.execute(q, params).fetchone()[0]
-            c.execute("UPDATE false_positives SET alert_count=? WHERE id=?", (n, fp["id"]))
+        c.execute(
+            """UPDATE false_positives SET alert_count = (
+                 SELECT COUNT(*) FROM alerts
+                 WHERE alerts.rule_id = false_positives.rule_id
+                   AND (false_positives.agent_name IS NULL
+                        OR alerts.agent_name = false_positives.agent_name)
+               )""")
 
 
 # ---------- recommended actions ----------
@@ -959,6 +964,16 @@ def osint_put(ioc_value: str, ioc_type: str, source: str, result: dict[str, Any]
                  expires_at=excluded.expires_at""",
             (ioc_value, ioc_type, source, json.dumps(result), expires),
         )
+
+
+def osint_purge_expired() -> int:
+    """Delete OSINT cache rows past their TTL. Returns the number removed.
+    osint_get already filters expired rows out of reads, but without this they
+    accumulate forever (and bloat idx_osint_lookup). Called by the retention
+    poller."""
+    with conn() as c:
+        cur = c.execute("DELETE FROM osint_results WHERE expires_at <= CURRENT_TIMESTAMP")
+        return cur.rowcount
 
 
 def osint_references(ioc_value: str) -> dict[str, list[Any]]:
