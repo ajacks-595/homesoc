@@ -1696,6 +1696,8 @@ def _cli_run_oneshot(kind: str) -> int:
         result = sync.sync_agent_status()
     elif kind == "briefings":
         result = sync.sync_briefings()
+    elif kind == "retention":
+        result = sync.run_retention()
     elif kind == "bootstrap":
         result = sync.first_run_bootstrap()
     else:

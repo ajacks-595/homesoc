@@ -6,7 +6,7 @@ import sync
 
 def test_poller_status_returns_deep_copy():
     snap = sync.poller_status()
-    assert set(snap["state"].keys()) == {"alerts", "dns", "agents", "briefings"}
+    assert set(snap["state"].keys()) == {"alerts", "dns", "agents", "briefings", "retention"}
     # mutating the returned snapshot must not affect module state
     snap["state"]["alerts"]["last_result"] = "TAMPERED"
     assert sync._poller_state["alerts"]["last_result"] != "TAMPERED"

@@ -1083,6 +1083,21 @@ def osint_purge_expired() -> int:
         return cur.rowcount
 
 
+def notification_log_prune(days: int = 30) -> int:
+    """Delete notification_log rows older than `days`. Returns rows removed."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+    with conn() as c:
+        return c.execute("DELETE FROM notification_log WHERE sent_at < ?", (cutoff,)).rowcount
+
+
+def ai_runs_prune(days: int = 7) -> int:
+    """Delete ai_runs accounting rows older than `days` (the usage meter only
+    needs the last 24h). Returns rows removed."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+    with conn() as c:
+        return c.execute("DELETE FROM ai_runs WHERE created_at < ?", (cutoff,)).rowcount
+
+
 def osint_references(ioc_value: str) -> dict[str, list[Any]]:
     """Find alerts/briefings that reference this IOC."""
     with conn() as c:

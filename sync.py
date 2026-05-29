@@ -351,6 +351,23 @@ def sync_dns_last_n(n: int = 7) -> list[dict[str, object]]:
     return out
 
 
+# ---------- retention / housekeeping --------------------------------------
+
+def run_retention() -> dict[str, int]:
+    """Prune unbounded-growth tables: expired OSINT cache, old notification_log
+    and ai_runs accounting. The audit log is intentionally NOT pruned (it's a
+    security record). Tunable via SOC_RETAIN_NOTIFY_DAYS / SOC_RETAIN_AIRUNS_DAYS."""
+    notify_days = int(_os.environ.get("SOC_RETAIN_NOTIFY_DAYS", "30"))
+    airuns_days = int(_os.environ.get("SOC_RETAIN_AIRUNS_DAYS", "7"))
+    res = {
+        "osint_expired":    db.osint_purge_expired(),
+        "notification_log": db.notification_log_prune(notify_days),
+        "ai_runs":          db.ai_runs_prune(airuns_days),
+    }
+    log.info("retention pruned: %s", res)
+    return res
+
+
 # ---------- first-run bootstrap -------------------------------------------
 
 def first_run_bootstrap() -> dict[str, object]:
@@ -380,6 +397,7 @@ _POLL_ALERTS_S    = int(_os.environ.get("SOC_POLL_ALERTS_S",    "300"))    # 5 m
 _POLL_DNS_S       = int(_os.environ.get("SOC_POLL_DNS_S",       "3600"))   # 1 hour
 _POLL_AGENTS_S    = int(_os.environ.get("SOC_POLL_AGENTS_S",    "900"))    # 15 min
 _POLL_BRIEFINGS_S = int(_os.environ.get("SOC_POLL_BRIEFINGS_S", "3600"))   # 1 hour
+_POLL_RETENTION_S = int(_os.environ.get("SOC_POLL_RETENTION_S", "86400"))  # daily
 
 _pollers_started = False
 # Guards _poller_state (written by 4 poller threads, read by the Flask
@@ -390,6 +408,7 @@ _poller_state: dict[str, dict[str, object]] = {
     "dns":       {"last_run": None, "last_result": None, "last_error": None},
     "agents":    {"last_run": None, "last_result": None, "last_error": None},
     "briefings": {"last_run": None, "last_result": None, "last_error": None},
+    "retention": {"last_run": None, "last_result": None, "last_error": None},
 }
 
 
@@ -432,8 +451,10 @@ def start_background_pollers() -> None:
     delayed(30, "dns",       _POLL_DNS_S,       sync_dns_today)
     delayed(20, "agents",    _POLL_AGENTS_S,    sync_agent_status)
     delayed(40, "briefings", _POLL_BRIEFINGS_S, sync_briefings)
-    log.info("background pollers scheduled (alerts %ds, dns %ds, agents %ds, briefings %ds)",
-             _POLL_ALERTS_S, _POLL_DNS_S, _POLL_AGENTS_S, _POLL_BRIEFINGS_S)
+    delayed(60, "retention", _POLL_RETENTION_S, run_retention)
+    log.info("background pollers scheduled (alerts %ds, dns %ds, agents %ds, "
+             "briefings %ds, retention %ds)",
+             _POLL_ALERTS_S, _POLL_DNS_S, _POLL_AGENTS_S, _POLL_BRIEFINGS_S, _POLL_RETENTION_S)
 
 
 def poller_status() -> dict[str, object]:
@@ -444,7 +465,8 @@ def poller_status() -> dict[str, object]:
         "intervals":  {"alerts_s":    _POLL_ALERTS_S,
                        "dns_s":       _POLL_DNS_S,
                        "agents_s":    _POLL_AGENTS_S,
-                       "briefings_s": _POLL_BRIEFINGS_S},
+                       "briefings_s": _POLL_BRIEFINGS_S,
+                       "retention_s": _POLL_RETENTION_S},
         "state":      state,
     }
 

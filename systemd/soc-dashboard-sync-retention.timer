@@ -1,0 +1,11 @@
+[Unit]
+Description=SOC Dashboard retention/housekeeping timer (daily)
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=24h
+Unit=soc-dashboard-sync@retention.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target
