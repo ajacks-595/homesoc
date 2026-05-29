@@ -476,6 +476,20 @@ def alert_detail(aid: int):
     return ok(row_to_dict(row))
 
 
+@api_bp.route("/alerts/<int:aid>/related")
+def alert_related(aid: int):
+    """IOC cross-correlation for this alert (other alerts + today's DNS in the
+    last 24h) — computed from the DB, no AI call."""
+    row = db.get_alert(aid)
+    if not row:
+        return err("not found", 404)
+    try:
+        raw = json.loads(row["raw_json"]) if row["raw_json"] else {}
+    except json.JSONDecodeError:
+        raw = {}
+    return ok(ai.related_observations(aid, raw))
+
+
 @api_bp.route("/alerts/export")
 def alerts_export():
     rows, _ = db.query_alerts(

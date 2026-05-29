@@ -787,6 +787,35 @@ const SOC = (() => {
     });
   }
 
+  // Non-AI IOC cross-correlation panel for an expanded alert row.
+  async function loadRelated(id, host) {
+    if (!host) return;
+    const r = await api(`/api/alerts/${id}/related`);
+    if (!r.success) { host.innerHTML = `<span class="muted small">—</span>`; return; }
+    const d = r.data || {};
+    if (!d.iocs || !d.iocs.length) {
+      host.innerHTML = `<span class="muted small">No indicators extracted from this alert.</span>`;
+      return;
+    }
+    let html = `<div class="tiny muted" style="margin-bottom:4px">Indicators: ${
+      d.iocs.map(i => `<a href="/osint?ioc=${encodeURIComponent(i)}" class="mono">${escapeHtml(i)}</a>`).join(", ")}</div>`;
+    if (d.alerts && d.alerts.length) {
+      html += `<table class="data"><tbody>` + d.alerts.map(a =>
+        `<tr><td class="mono tiny">${fmt.ts(a.timestamp)}</td>
+             <td class="mono tiny">${escapeHtml(a.ioc)}</td>
+             <td>${escapeHtml(a.agent_name || "—")}</td>
+             <td><a href="/alerts?focus=${encodeURIComponent(a.id)}">rule ${escapeHtml(a.rule_id)}</a> <span class="muted">L${escapeHtml(a.rule_level)}</span></td>
+             <td>${escapeHtml(fmt.short(a.rule_description, 70))}</td></tr>`).join("") + `</tbody></table>`;
+    } else {
+      html += `<div class="muted small">No other alerts referenced these indicators in the last 24h.</div>`;
+    }
+    if (d.dns && d.dns.length) {
+      html += `<div class="tiny" style="margin-top:6px">DNS today: ` + d.dns.map(x =>
+        `<span class="badge ${x.status === "blocked" ? "danger" : "muted"}">${escapeHtml(x.domain)} ${escapeHtml(x.status)} ×${escapeHtml(x.count)}</span>`).join(" ") + `</div>`;
+    }
+    host.innerHTML = html;
+  }
+
   function toggleAlertRow(tr, a) {
     const next = tr.nextElementSibling;
     if (next && next.classList.contains("alert-expanded")) {
@@ -858,6 +887,10 @@ const SOC = (() => {
           <pre class="pre" style="max-height:300px">${escapeHtml(JSON.stringify(a.raw_json, null, 2))}</pre>
         </div>
       </div>
+      <div class="related-activity" data-related="${a.id}" style="margin-top:12px">
+        <h3 style="margin:0 0 6px">Related activity <span class="muted tiny">(last 24h, by indicator)</span></h3>
+        <div class="related-body muted small">Looking for related activity…</div>
+      </div>
       <div class="ai-explain" data-alert-id="${a.id}" style="margin-top:12px">
         <div class="flex-row" style="justify-content:space-between">
           <h3 style="margin:0">AI Explanation <span class="muted tiny">(web-enabled)</span></h3>
@@ -887,6 +920,9 @@ const SOC = (() => {
     linkifyIpsInEl(td);
     x.appendChild(td);
     tr.parentNode.insertBefore(x, tr.nextSibling);
+
+    // Related activity (non-AI IOC correlation) — best-effort, loaded async
+    loadRelated(a.id, td.querySelector(`[data-related="${a.id}"] .related-body`));
 
     // AI explain button — fetch (or generate) the explanation
     const aiBtn = td.querySelector(`[data-explain="${a.id}"]`);

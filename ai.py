@@ -195,6 +195,49 @@ def _related_observations(alert_id: int, alert_raw: dict[str, Any],
     return "\n=== RELATED OBSERVATIONS (from your network, last 24h) ===\n" + "\n".join(lines)
 
 
+def related_observations(alert_id: int, alert_raw: dict[str, Any],
+                         max_items: int = 30) -> dict[str, Any]:
+    """Structured cross-correlation for the UI 'Related activity' panel — the
+    same IOC overlap _related_observations summarizes for the AI prompt, but
+    returned as data and WITHOUT any Claude call, so it's cheap to show on every
+    alert expand. Returns {iocs, alerts:[{ioc,...}], dns:[{domain,status,count}]}."""
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    iocs = _extract_iocs(alert_raw)
+    flat = sorted(iocs["ipv4"] | iocs["domain"] | iocs["hash"])
+    out: dict[str, Any] = {"iocs": flat, "alerts": [], "dns": []}
+    if not flat:
+        return out
+
+    cutoff = (_dt.now(_tz.utc) - _td(hours=24)).strftime("%Y-%m-%dT%H:%M:%S")
+    with db.conn() as c:
+        for ioc in flat[:10]:
+            if len(out["alerts"]) >= max_items:
+                break
+            rows = c.execute(
+                """SELECT id, timestamp, agent_name, rule_id, rule_level, rule_description
+                   FROM alerts
+                   WHERE id != ? AND timestamp >= ?
+                     AND (raw_json LIKE ? OR full_log LIKE ?)
+                   ORDER BY timestamp DESC LIMIT 5""",
+                (alert_id, cutoff, f"%{ioc}%", f"%{ioc}%"),
+            ).fetchall()
+            for r in rows:
+                if len(out["alerts"]) >= max_items:
+                    break
+                out["alerts"].append({"ioc": ioc, **dict(r)})
+
+    today = _dt.now(_tz.utc).strftime("%Y-%m-%d")
+    dns = db.dns_get_daily(today) or {}
+    top_blocked = {d["domain"]: d["count"] for d in dns.get("top_blocked", [])}
+    top_queried = {d["domain"]: d["count"] for d in dns.get("top_queried", [])}
+    for domain in sorted(iocs["domain"])[:5]:
+        if domain in top_blocked:
+            out["dns"].append({"domain": domain, "status": "blocked", "count": top_blocked[domain]})
+        elif domain in top_queried:
+            out["dns"].append({"domain": domain, "status": "queried", "count": top_queried[domain]})
+    return out
+
+
 def explain(alert_raw: dict[str, Any], model: str = DEFAULT_MODEL,
             alert_id: int | None = None) -> tuple[str, str]:
     """Generate an AI explanation of the alert. Returns (content, model_used)."""
