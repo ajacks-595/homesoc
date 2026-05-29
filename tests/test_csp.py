@@ -37,6 +37,31 @@ def test_inline_script_nonce_matches_header(client):
     assert "<script src=" in body                        # external scripts unchanged ('self')
 
 
+PAGES = ["/", "/alerts", "/briefings", "/osint", "/fp-manager",
+         "/actions", "/hosts", "/threat-intel", "/settings"]
+
+
+def test_pages_have_no_inline_handlers_and_nonced_scripts(client):
+    """Every rendered page must be CSP-clean: no inline on* handlers (the nonce
+    CSP would silently break them) and every inline <script> carries the
+    request nonce. This is the static stand-in for the browser E2E."""
+    client.post("/setup", data={"username": "admin", "password": "supersecret"})
+    for path in PAGES:
+        r = client.get(path)
+        assert r.status_code == 200, (path, r.status_code)
+        html = r.get_data(as_text=True)
+        nonce = re.search(r"'nonce-([A-Za-z0-9_-]+)'",
+                          r.headers["Content-Security-Policy"]).group(1)
+        # inline event handlers would be blocked by the nonce CSP — there must be none
+        assert not re.findall(r"\son[a-z]+=", html), (path, set(re.findall(r"\son[a-z]+=", html)))
+        # every inline <script> (no src) must carry the matching nonce
+        for m in re.finditer(r"<script(\s[^>]*)?>", html):
+            attrs = m.group(1) or ""
+            if "src=" in attrs:
+                continue
+            assert f'nonce="{nonce}"' in attrs, (path, attrs)
+
+
 def test_nonce_differs_per_request(client):
     a = re.search(r"'nonce-([A-Za-z0-9_-]+)'",
                   client.get("/login").headers["Content-Security-Policy"]).group(1)
