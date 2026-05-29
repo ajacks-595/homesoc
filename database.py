@@ -312,6 +312,12 @@ def init_db() -> None:
     with conn() as c:
         c.executescript(SCHEMA)
         _apply_migrations(c)
+        # Composite index for the dominant access path: status filter + recency
+        # ordering (overview, query_alerts, latest_alerts, /api/home/*). Created
+        # AFTER migrations because `status` is a migration-added column on DBs
+        # that predate it, so it may not exist at executescript time.
+        c.execute("CREATE INDEX IF NOT EXISTS idx_alerts_status_ts "
+                  "ON alerts(status, timestamp DESC)")
         _seed_host_config_for_upgrade(c)
     # The DB holds Fernet-encrypted secrets + the signed-session key. Its key
     # material (/etc/machine-id) is world-readable, so a local user able to read
