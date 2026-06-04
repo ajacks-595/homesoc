@@ -14,7 +14,6 @@ without further migration.
 from __future__ import annotations
 
 import base64
-import functools
 import hashlib
 import hmac
 import logging
@@ -22,10 +21,9 @@ import os
 import secrets
 import threading
 import time
-from typing import Any
 
 import pyotp
-from flask import g, redirect, request, session, url_for
+from flask import g, redirect, request, session
 
 import config
 import database as db
@@ -75,6 +73,13 @@ def needs_rehash(stored: str) -> bool:
         return scheme == "pbkdf2" and int(iters) < _PBKDF2_ITERATIONS
     except (ValueError, TypeError, AttributeError):
         return False
+
+
+# A throwaway hash verified against when the supplied username does not exist
+# (or is disabled). Running an equal-cost PBKDF2 on the no-such-user path means
+# the login response time no longer reveals whether a username exists — closing
+# the account-enumeration timing oracle. Computed once at import.
+_DUMMY_PASSWORD_HASH = hash_password("homesoc-dummy-password-for-timing-parity")
 
 
 # ---------- login brute-force throttle ------------------------------------
@@ -196,6 +201,46 @@ PUBLIC_ENDPOINTS = {
     "auth.logout",
     "static",
 }
+
+
+def safe_next_path(raw: str | None) -> str:
+    """Return a safe same-origin path for a post-login redirect, else '/'.
+
+    Closes the open-redirect class — including the `next=/\\evil.com` bypass,
+    where a leading-slash-then-backslash slips past a naive startswith('//')
+    check but browsers fold '\\' to '/', yielding '//evil.com' (off-origin).
+    We require a path-only reference: no scheme, no netloc, no backslashes,
+    no control chars, must start with a single '/'.
+    """
+    from urllib.parse import urlsplit
+    nxt = (raw or "/").strip()
+    if not nxt or "\\" in nxt or any(ord(ch) < 0x20 for ch in nxt):
+        return "/"
+    if not nxt.startswith("/") or nxt.startswith("//"):
+        return "/"
+    try:
+        parts = urlsplit(nxt)
+    except ValueError:
+        return "/"
+    if parts.scheme or parts.netloc:
+        return "/"
+    return nxt
+
+
+def require_admin():
+    """Authorisation gate for administrative endpoints. Returns None when the
+    current user has the 'admin' role, else a 403 JSON response.
+
+    Authentication itself is already enforced by login_required_globally, so a
+    missing/non-admin user here means an authenticated non-admin — 403, not 401.
+    Applied to user management, host-config writes, the home-API token, backups,
+    audit log, and shared API keys."""
+    from flask import jsonify
+    u = current_user()
+    if u and (u.get("role") or "").lower() == "admin":
+        return None
+    return jsonify({"success": False, "data": None,
+                    "error": "admin role required"}), 403
 
 
 def current_user() -> dict | None:
@@ -355,7 +400,7 @@ def audit(action: str, target_type: str | None = None,
 
 # ---------- blueprint -----------------------------------------------------
 
-from flask import Blueprint, render_template, request as _req
+from flask import Blueprint, render_template
 auth_bp = Blueprint("auth", __name__)
 
 
@@ -408,7 +453,12 @@ def login_submit():
             next=next_path), 429
 
     row = db.get_user_by_username(username)
-    if row and not row["disabled"] and verify_password(password, row["password_hash"]):
+    # Always run a PBKDF2 verify — against the real hash if the user exists, or a
+    # dummy hash if not — so the response time can't distinguish valid usernames
+    # from invalid ones (account-enumeration timing oracle).
+    stored_hash = row["password_hash"] if row else _DUMMY_PASSWORD_HASH
+    password_ok = verify_password(password, stored_hash)
+    if row and not row["disabled"] and password_ok:
         login_record_success(ip, username)
         # Transparently upgrade legacy / low-iteration hashes (no forced reset).
         if needs_rehash(row["password_hash"]):
@@ -427,10 +477,7 @@ def login_submit():
         session["user_id"] = row["id"]
         db.update_user_login(row["id"])
         audit("user.login", "user", row["id"])
-        # Prevent open-redirect: only allow same-origin paths
-        if not next_path.startswith("/") or next_path.startswith("//"):
-            next_path = "/"
-        return redirect(next_path)
+        return redirect(safe_next_path(next_path))
 
     login_record_failure(ip, username)
     audit("user.login_failed", "user", row["id"] if row else None,
@@ -460,9 +507,7 @@ def login_2fa():
         session["user_id"] = uid
         db.update_user_login(uid)
         audit("user.login", "user", uid, {"via": "totp"})
-        if not next_path.startswith("/") or next_path.startswith("//"):
-            next_path = "/"
-        return redirect(next_path)
+        return redirect(safe_next_path(next_path))
     login_record_failure(ip, key)
     audit("user.login_2fa_failed", "user", uid)
     return render_template("login.html", theme=config.DEFAULT_THEME, totp=True,

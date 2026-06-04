@@ -376,34 +376,35 @@ def add_suppression(rule_id: str, description: str, agent_name: str | None = Non
     if not rid.isdigit():
         return _error("rule_id must be numeric")
 
-    try:
-        original = wazuh.read_local_rules()
-    except Exception as e:  # noqa: BLE001
-        return _error(f"cannot read local_rules.xml: {e}")
-
-    new_rid = wazuh.next_local_rule_id(original)
-    snippet = wazuh.build_suppression(rid, agent, desc, new_rid)
-    updated = wazuh.insert_into_group(original, snippet)
-
-    try:
-        wazuh.write_local_rules(updated)
-    except Exception as e:  # noqa: BLE001
-        return _error(f"write failed: {e}")
-
-    ok_verify, verify_out = wazuh.verify_config()
-    if not ok_verify:
+    with wazuh.LOCAL_RULES_LOCK:
         try:
-            wazuh.write_local_rules(original)  # roll back
-        except Exception:  # noqa: BLE001
-            log.exception("rollback after failed verify also failed")
-        return _error(f"verifyconf failed (rolled back): {verify_out[-500:]}")
+            original = wazuh.read_local_rules()
+        except Exception as e:  # noqa: BLE001
+            return _error(f"cannot read local_rules.xml: {e}")
 
-    ok_restart, restart_out = wazuh.restart_manager()
-    if not ok_restart:
-        return _error(f"manager restart failed: {restart_out[-500:]}")
+        new_rid = wazuh.next_local_rule_id(original)
+        snippet = wazuh.build_suppression(rid, agent, desc, new_rid)
+        updated = wazuh.insert_into_group(original, snippet)
 
-    db.insert_fp(rid, agent, desc, new_rid, snippet)
-    db.refresh_fp_alert_counts()
+        try:
+            wazuh.write_local_rules(updated)
+        except Exception as e:  # noqa: BLE001
+            return _error(f"write failed: {e}")
+
+        ok_verify, verify_out = wazuh.verify_config()
+        if not ok_verify:
+            try:
+                wazuh.write_local_rules(original)  # roll back
+            except Exception:  # noqa: BLE001
+                log.exception("rollback after failed verify also failed")
+            return _error(f"verifyconf failed (rolled back): {verify_out[-500:]}")
+
+        ok_restart, restart_out = wazuh.restart_manager()
+        if not ok_restart:
+            return _error(f"manager restart failed: {restart_out[-500:]}")
+
+        db.insert_fp(rid, agent, desc, new_rid, snippet)
+        db.refresh_fp_alert_counts()
     _audit("fp.add", "wazuh_rule", new_rid,
            {"suppresses": rid, "agent": agent, "description": desc})
     return _ok({"new_rule_id": new_rid, "suppresses": rid, "agent": agent,
@@ -422,27 +423,28 @@ def delete_suppression(fp_id: int) -> str:
     if not row:
         return _error(f"suppression {fp_id} not found")
 
-    try:
-        original = wazuh.read_local_rules()
-    except Exception as e:  # noqa: BLE001
-        return _error(str(e))
-
-    updated = wazuh.remove_rule_from_xml(original, row["wazuh_rule_id"])
-    try:
-        wazuh.write_local_rules(updated)
-    except Exception as e:  # noqa: BLE001
-        return _error(f"write failed: {e}")
-
-    ok_verify, verify_out = wazuh.verify_config()
-    if not ok_verify:
+    with wazuh.LOCAL_RULES_LOCK:
         try:
-            wazuh.write_local_rules(original)  # roll back
-        except Exception:  # noqa: BLE001
-            log.exception("rollback after failed verify also failed")
-        return _error(f"verifyconf failed (rolled back): {verify_out[-500:]}")
+            original = wazuh.read_local_rules()
+        except Exception as e:  # noqa: BLE001
+            return _error(str(e))
 
-    wazuh.restart_manager()
-    db.delete_fp(fp_id)
+        updated = wazuh.remove_rule_from_xml(original, row["wazuh_rule_id"])
+        try:
+            wazuh.write_local_rules(updated)
+        except Exception as e:  # noqa: BLE001
+            return _error(f"write failed: {e}")
+
+        ok_verify, verify_out = wazuh.verify_config()
+        if not ok_verify:
+            try:
+                wazuh.write_local_rules(original)  # roll back
+            except Exception:  # noqa: BLE001
+                log.exception("rollback after failed verify also failed")
+            return _error(f"verifyconf failed (rolled back): {verify_out[-500:]}")
+
+        wazuh.restart_manager()
+        db.delete_fp(fp_id)
     _audit("fp.delete", "wazuh_rule", row["wazuh_rule_id"],
            {"suppressed_rule": row["rule_id"]})
     return _ok({"deleted": fp_id, "removed_rule_id": row["wazuh_rule_id"]})

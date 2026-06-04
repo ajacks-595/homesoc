@@ -241,7 +241,7 @@ const SOC = (() => {
            <span class="badge danger">L${a.rule_level}</span>
            ${escapeHtml(fmt.ts(a.timestamp))} ·
            <strong>${escapeHtml(a.agent_name || "—")}</strong> ·
-           rule ${a.rule_id} —
+           rule ${escapeHtml(a.rule_id)} —
            ${escapeHtml(fmt.short(a.rule_description, 110))}
          </div>`).join("");
       banners.push(

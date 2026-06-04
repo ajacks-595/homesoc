@@ -1,8 +1,11 @@
-Flask>=3.0
-markdown>=3.5
-nh3>=0.2.15           # HTML sanitization of rendered markdown (XSS defense)
-cryptography>=42.0
-pyotp>=2.9             # optional per-user TOTP 2FA
-requests>=2.31
-defusedxml>=0.7        # safe XML parsing for Wazuh local_rules.xml
-waitress>=3.0         # production WSGI server (single process + thread pool)
+# Upper bounds pin the major version so a `pip install` can't silently pull a
+# breaking new major. Patch/minor updates within the major still flow in. For
+# fully reproducible deploys, generate a lockfile (pip freeze) on the target.
+Flask>=3.0,<4
+markdown>=3.5,<4
+nh3>=0.2.15,<1         # HTML sanitization of rendered markdown (XSS defense)
+cryptography>=42.0,<46
+pyotp>=2.9,<3          # optional per-user TOTP 2FA
+requests>=2.31,<3
+defusedxml>=0.7,<0.8   # safe XML parsing for Wazuh local_rules.xml
+waitress>=3.0,<4       # production WSGI server (single process + thread pool)

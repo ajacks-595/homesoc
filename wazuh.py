@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import re
 import subprocess
+import threading
 from datetime import datetime, timezone
 from typing import Any
 
@@ -12,6 +13,13 @@ import defusedxml.ElementTree as DET  # safe XML parsing (no entity expansion)
 import config
 
 log = logging.getLogger("soc.wazuh")
+
+# Serialises the read→modify→verify→write→restart cycle on local_rules.xml so
+# two concurrent FP add/delete operations can't compute the same next rule id or
+# interleave writes. In-process only (the Flask app is a single waitress
+# process); the separate MCP server process isn't coordinated by this lock, but
+# the verify-then-rollback step still catches a duplicate-id collision there.
+LOCAL_RULES_LOCK = threading.RLock()
 
 
 # ---------- shell helpers ---------------------------------------------------

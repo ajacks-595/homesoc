@@ -48,11 +48,18 @@ next dev session.
 
 ## Bigger
 - [x] **Auth layer** — per-user PBKDF2 (600k) login with sessions, brute-force
-      throttling, optional TOTP 2FA, and a full audit log. Rule changes are
-      authenticated + audited.
+      throttling (timing-safe against username enumeration), optional TOTP 2FA,
+      same-origin-only post-login redirect, and a full audit log. Rule changes
+      are authenticated + audited.
+- [x] **Admin/user roles enforced** — `auth.require_admin()` gates user mgmt,
+      host-config writes, the home-API token, backups, audit log, and shared API
+      keys. First account is admin; later accounts default to `user`. Follow-up:
+      finer per-endpoint RBAC + UI gating (non-admins still see admin controls
+      that 403).
 - [ ] **CSRF tokens** on mutating endpoints. Mitigated in practice today by
       `SameSite=Lax` cookies + JSON-only `fetch`; add Flask-WTF before exposing
-      to multiple users / a public origin.
+      to multiple users / a public origin. (Behind a proxy, also set
+      `SOC_TRUST_PROXY` so the throttle/audit see the real client IP.)
 - [ ] **Multi-host hosts page** — current schema assumes one Wazuh manager.
       Generalise.
 - [ ] **Briefing actions** would benefit from being editable in the UI

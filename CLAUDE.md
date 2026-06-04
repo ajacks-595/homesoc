@@ -855,8 +855,48 @@ listener.
 ## Project-specific repo review additions
 
 (Populated by `repo review` runs — additions appear here over time, with
-date + rationale. Currently empty for a fresh repo; first `repo review`
-will start adding patterns it identifies as gaps.)
+date + rationale.)
+
+### 2026-06-04 — code review of the Codex-authored tree (M1–M4 + L1–L12)
+
+Bug classes found that had no dedicated test, now covered:
+
+- **Open redirect via `next=` (M1).** A leading-slash-then-backslash
+  (`next=/\evil.com`) folds to `//evil.com` in the browser and bypassed the
+  naive `startswith('//')` guard. Fix: `auth.safe_next_path()` rejects scheme,
+  netloc, backslashes, and `//`. Test: `tests/test_open_redirect.py`.
+  → When reflecting any user-controlled redirect target, validate with a real
+  URL split, not string prefixes.
+- **CSV/formula injection in the alert export (M2, CWE-1236).** `full_log` is
+  attacker-influenced; cells starting with `= + - @` execute in spreadsheet
+  apps. Fix: `app._csv_safe()`. Test: `tests/test_csv_injection.py`.
+  → Any future CSV/TSV export must run cells through `_csv_safe`.
+- **Login username-enumeration timing oracle (M4).** No-such-user returned
+  before hashing. Fix: verify against `auth._DUMMY_PASSWORD_HASH` on the
+  no-user path. Test: `tests/test_login_timing.py`.
+- **`remote_addr` trusted with no proxy awareness (M3).** Throttle + audit IP
+  collapse to the proxy IP behind a reverse proxy. Fix: opt-in `ProxyFix` via
+  `SOC_TRUST_PROXY=<hops>` (default 0). Re-check when the Caddy/HTTPS work lands.
+- **Admin endpoints had no authorization (L7).** The `role` column was stored
+  but never enforced — any logged-in `user` had full admin. Fix:
+  `auth.require_admin()` on user mgmt / host-config writes / home-API token /
+  backups / audit log / API keys. Test: `tests/test_admin_required.py`.
+  → New admin-only endpoints MUST start with `if (resp := auth.require_admin()): return resp`.
+- **Webhook secret partial-leak (L1).** List view returned the last 6 chars of
+  the decrypted URL. Fix: `_webhook_url_hint()` returns host only. Test:
+  `tests/test_webhook_secret.py`.
+- **Unbounded integer query params (L3).** `int_arg` without `maximum=` allowed
+  self-inflicted OOM (`/api/dns/sync?days=1e8`, audit `limit`, etc.). Fix:
+  `maximum=` on all such calls. Test: `tests/test_int_clamp.py`.
+  → Always pass `maximum=` to `int_arg` for any value that sizes a query/loop.
+- **Concurrency (L5/L6).** `wazuh.LOCAL_RULES_LOCK` serialises the FP
+  read→write→verify→restart cycle (web + MCP); `sync._sync_alerts_lock`
+  serialises alert classify→insert→dispatch so a manual sync + the poller can't
+  double-dispatch.
+
+Other low-risk cleanups this pass: `/2fa/*` handlers now None-guard
+`current_user()`; `requirements.txt` got major-version upper bounds; 15 unused
+imports removed (`ruff --fix`, F401/E401 only).
 
 ## Open items / future work
 
@@ -865,9 +905,12 @@ Tracked in `ROADMAP.md`. Headline items:
 - **HTTPS / TLS** — being researched separately (Caddy reverse proxy with
   Let's Encrypt DNS-01 via Cloudflare API, AdGuard split-horizon DNS so the
   hostname doesn't appear in public DNS at all)
-- **Roles** — schema supports a `role` column; only the flat single-role
-  mode is currently used. Per-user RBAC (read-only vs admin) would be one
-  middleware addition + a few endpoint annotations
+- **Roles** — `admin` vs `user` is now ENFORCED on the administrative surface
+  (user mgmt, host-config writes, home-API token, backups, audit log, API keys)
+  via `auth.require_admin()`. First account (`/setup`) is admin; later accounts
+  default to `user`. Remaining work: finer-grained per-endpoint RBAC (e.g.
+  read-only analysts who can't resolve alerts) and UI gating so non-admins don't
+  see admin controls that 403 (backend is the enforced boundary today)
 - **CSRF protection** — no tokens. Mitigated in practice by `SameSite=Lax`
   session cookies + JSON-only `fetch`; add Flask-WTF before exposing via a
   reverse proxy to multiple users

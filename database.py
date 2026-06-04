@@ -293,7 +293,8 @@ def _seed_host_config_for_upgrade(c: sqlite3.Connection) -> None:
 
     # Pull from env vars only (no Jacknet IPs in code). User can refine
     # via /settings → Hosts after the upgrade.
-    import os, json
+    import os
+    import json
     from config import encrypt
     seeded = {
         k: v for k, v in {

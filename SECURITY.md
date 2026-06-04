@@ -30,12 +30,28 @@ internet without putting a hardened reverse proxy in front of it.
   schemes (`http(s)`/`mailto`/same-origin only)
 - Outbound webhook URLs are SSRF-checked (loopback / link-local / cloud
   metadata blocked; `SOC_WEBHOOK_ALLOW_PRIVATE=0` also blocks LAN ranges)
-- `/login` is rate-limited per IP + username, with a failed-login audit trail
+- `/login` is rate-limited per IP + username, with a failed-login audit trail;
+  the no-such-user path runs an equal-cost PBKDF2 verify so response timing
+  can't be used to enumerate valid usernames
+- The post-login `next=` redirect is constrained to same-origin paths (absolute,
+  protocol-relative, and backslash-folding `//`-style targets are rejected)
 - Session cookies are HttpOnly + SameSite=Lax; `Secure` flag flipped on
   by setting `SOC_COOKIE_SECURE=1` (do this once you're behind TLS)
+- **Role-gated admin surface**: user management, host-config writes, the
+  home-API token, DB backups, the audit log, and shared OSINT API keys require
+  the `admin` role. The first account (created at `/setup`) is admin; accounts
+  created afterwards default to `user` and get the read/triage surface only
+- Outbound webhook list views expose only the destination host, never any of
+  the URL path/query (where the platform token lives)
+- The alert CSV export neutralises spreadsheet-formula injection (cells
+  starting with `= + - @` are quoted)
 - Every state-changing API endpoint records to the audit log
 - SSH commands use explicit argv lists (validated against argument injection);
   no `shell=True`
+- Behind a reverse proxy, set `SOC_TRUST_PROXY=<hops>` so the login throttle
+  and audit log see the real client IP from `X-Forwarded-For` (default `0` =
+  trust nothing; never enable it when the app is reachable directly, or clients
+  could spoof their IP)
 
 ## The home consumer API (`/api/home/*`)
 

@@ -6,7 +6,6 @@ import ipaddress
 import json
 import re
 from collections import Counter, defaultdict
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
@@ -43,7 +42,6 @@ def extract_recommended_actions(content: str) -> list[dict[str, str]]:
         section = section[:end.start()]
 
     out: list[dict[str, str]] = []
-    pos = 0
     headers = list(_P_HEADER.finditer(section))
     for i, hm in enumerate(headers):
         priority = hm.group(1)

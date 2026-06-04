@@ -9,7 +9,6 @@ import queue
 import threading
 import time
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 import config
 import database as db
@@ -97,6 +96,14 @@ def sync_hosts_from_context() -> int:
 
 # ---------- alerts ---------------------------------------------------------
 
+# Serialises the classify→insert→enqueue section so an overlapping manual
+# /api/alerts/sync and the background alerts poller can't both classify the same
+# alert as "new" and double-dispatch it (AI auto-explain + webhook). The slow
+# network fetch stays outside the lock; the second caller re-reads "existing"
+# only after the first has committed its inserts.
+_sync_alerts_lock = threading.Lock()
+
+
 def sync_recent_alerts(max_bytes: int = 8 * 1024 * 1024,
                        dispatch_notifications: bool = True) -> dict[str, int]:
     try:
@@ -107,25 +114,28 @@ def sync_recent_alerts(max_bytes: int = 8 * 1024 * 1024,
         log.warning("cannot fetch alerts: %s", e)
         return {"fetched": 0, "inserted": 0, "error": str(e)}
     parsed = parsers.parse_wazuh_alerts_stream(text)
-    # Track which wazuh_ids are new (vs already in the DB) so we know which
-    # alerts to enrich + dispatch. INSERT OR IGNORE means we can't tell from
-    # rowcount alone, so snapshot before/after.
-    new_wazuh_ids = set()
-    if dispatch_notifications and parsed:
-        with db.conn() as c:
-            existing = c.execute(
-                "SELECT wazuh_id FROM alerts WHERE wazuh_id IN (" +
-                ",".join("?" * len(parsed)) + ")",
-                [a["wazuh_id"] for a in parsed if a.get("wazuh_id")],
-            ).fetchall()
-        existing_ids = {r["wazuh_id"] for r in existing}
-        new_wazuh_ids = {a["wazuh_id"] for a in parsed
-                         if a.get("wazuh_id") and a["wazuh_id"] not in existing_ids}
 
-    n = db.insert_alerts_bulk(parsed)
+    with _sync_alerts_lock:
+        # Track which wazuh_ids are new (vs already in the DB) so we know which
+        # alerts to enrich + dispatch. INSERT OR IGNORE means we can't tell from
+        # rowcount alone, so snapshot before/after — under the lock so a
+        # concurrent run sees our inserts and won't re-dispatch the same ids.
+        new_wazuh_ids = set()
+        if dispatch_notifications and parsed:
+            with db.conn() as c:
+                existing = c.execute(
+                    "SELECT wazuh_id FROM alerts WHERE wazuh_id IN (" +
+                    ",".join("?" * len(parsed)) + ")",
+                    [a["wazuh_id"] for a in parsed if a.get("wazuh_id")],
+                ).fetchall()
+            existing_ids = {r["wazuh_id"] for r in existing}
+            new_wazuh_ids = {a["wazuh_id"] for a in parsed
+                             if a.get("wazuh_id") and a["wazuh_id"] not in existing_ids}
 
-    if dispatch_notifications and new_wazuh_ids:
-        _enqueue_dispatch(new_wazuh_ids)
+        n = db.insert_alerts_bulk(parsed)
+
+        if dispatch_notifications and new_wazuh_ids:
+            _enqueue_dispatch(new_wazuh_ids)
 
     return {"fetched": len(parsed), "inserted": n,
             "dispatched": len(new_wazuh_ids) if dispatch_notifications else 0}

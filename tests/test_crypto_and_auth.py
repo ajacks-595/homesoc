@@ -1,5 +1,4 @@
 """Smoke tests for crypto (Fernet) and auth (PBKDF2)."""
-import os
 
 
 def test_fernet_roundtrip():

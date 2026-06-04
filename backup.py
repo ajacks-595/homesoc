@@ -9,16 +9,13 @@ destination (e.g. Synology NAS).
 """
 from __future__ import annotations
 
-import io
 import logging
 import os
-import shutil
 import sqlite3
 import subprocess
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator
 
 import config
 import database as db

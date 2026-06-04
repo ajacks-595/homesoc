@@ -7,7 +7,6 @@ module formats and delivers a payload appropriate for that platform.
 from __future__ import annotations
 
 import ipaddress
-import json
 import logging
 import os
 import socket

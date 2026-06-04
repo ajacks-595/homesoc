@@ -9,12 +9,11 @@ import os
 import re
 import threading
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 import markdown as md_lib
 import nh3
 from flask import (
-    Blueprint, Flask, abort, g, jsonify, render_template, request, send_file,
+    Blueprint, Flask, g, jsonify, render_template, request, send_file,
 )
 
 import ai
@@ -86,6 +85,17 @@ def int_field(data: dict, name: str, default: int) -> int:
         return int(data[name])
     except (TypeError, ValueError):
         raise BadParam(f"{name} must be an integer")
+
+
+def _csv_safe(value) -> str:
+    """Neutralise CSV/formula injection (CWE-1236). Spreadsheet apps execute a
+    cell whose text starts with = + - @ (or a leading tab/CR), and alert fields
+    like full_log are attacker-influenced. Prefix any such cell with a single
+    quote so it's treated as text, not a formula."""
+    s = "" if value is None else str(value)
+    if s and s[0] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + s
+    return s
 
 
 def row_to_dict(row) -> dict:
@@ -296,7 +306,7 @@ def alerts_query():
         date_to=request.args.get("date_to"),
         agent=request.args.get("agent"),
         rule_id=request.args.get("rule_id"),
-        min_level=int_arg("min_level"),
+        min_level=int_arg("min_level", minimum=0, maximum=16),
         group=request.args.get("group"),
         search=request.args.get("q"),
         mitre=request.args.get("mitre"),
@@ -464,8 +474,8 @@ def alerts_ack(aid: int):
 
 @api_bp.route("/alerts/latest")
 def alerts_latest():
-    rows = db.latest_alerts(min_level=int_arg("min_level", 7),
-                            limit=int_arg("limit", 10))
+    rows = db.latest_alerts(min_level=int_arg("min_level", 7, minimum=0, maximum=16),
+                            limit=int_arg("limit", 10, minimum=1, maximum=200))
     return ok([row_to_dict(r) for r in rows])
 
 
@@ -494,13 +504,13 @@ def alert_related(aid: int):
 @api_bp.route("/mitre/summary")
 def mitre_overview():
     """MITRE ATT&CK tactic/technique counts over the last N days (default 7)."""
-    return ok(db.mitre_summary(days=int_arg("days", 7)))
+    return ok(db.mitre_summary(days=int_arg("days", 7, minimum=1, maximum=365)))
 
 
 @api_bp.route("/metrics/soc")
 def soc_metrics_overview():
     """Analyst performance metrics (MTTR, FP rate, triage volume) over N days."""
-    return ok(db.soc_metrics(days=int_arg("days", 7)))
+    return ok(db.soc_metrics(days=int_arg("days", 7, minimum=1, maximum=365)))
 
 
 @api_bp.route("/alerts/export")
@@ -510,7 +520,7 @@ def alerts_export():
         date_to=request.args.get("date_to"),
         agent=request.args.get("agent"),
         rule_id=request.args.get("rule_id"),
-        min_level=int_arg("min_level"),
+        min_level=int_arg("min_level", minimum=0, maximum=16),
         group=request.args.get("group"),
         search=request.args.get("q"),
         limit=10000,
@@ -521,9 +531,10 @@ def alerts_export():
     w.writerow(["timestamp", "agent_name", "agent_ip", "rule_id", "rule_level",
                 "rule_description", "rule_groups", "location", "full_log"])
     for r in rows:
-        w.writerow([r["timestamp"], r["agent_name"], r["agent_ip"],
-                    r["rule_id"], r["rule_level"], r["rule_description"],
-                    r["rule_groups"], r["location"], r["full_log"]])
+        w.writerow([_csv_safe(c) for c in (
+            r["timestamp"], r["agent_name"], r["agent_ip"],
+            r["rule_id"], r["rule_level"], r["rule_description"],
+            r["rule_groups"], r["location"], r["full_log"])])
     data = buf.getvalue().encode("utf-8")
     return send_file(
         io.BytesIO(data), mimetype="text/csv",
@@ -663,7 +674,8 @@ def fp_list():
 @api_bp.route("/fp/noisy-rules")
 def fp_noisy_rules():
     """Noisiest rules over the window — FP-suppression candidates."""
-    return ok(db.noisy_rules(days=int_arg("days", 7), limit=int_arg("limit", 20)))
+    return ok(db.noisy_rules(days=int_arg("days", 7, minimum=1, maximum=365),
+                             limit=int_arg("limit", 20, minimum=1, maximum=200)))
 
 
 @api_bp.route("/fp/rules-xml")
@@ -728,35 +740,38 @@ def fp_add():
     if not rid.isdigit():
         return err("rule_id must be numeric")
 
-    try:
-        original = wazuh.read_local_rules()
-    except Exception as e:  # noqa: BLE001
-        return err(f"cannot read local_rules.xml: {e}", 500)
-
-    new_rid = wazuh.next_local_rule_id(original)
-    snippet = wazuh.build_suppression(rid, agent, desc, new_rid)
-    updated = wazuh.insert_into_group(original, snippet)
-
-    try:
-        wazuh.write_local_rules(updated)
-    except Exception as e:  # noqa: BLE001
-        return err(f"write failed: {e}", 500)
-
-    ok_verify, verify_out = wazuh.verify_config()
-    if not ok_verify:
-        # Roll back
+    # Serialise the whole read→write→verify→restart cycle so concurrent adds
+    # can't allocate the same new rule id or interleave writes (L5).
+    with wazuh.LOCAL_RULES_LOCK:
         try:
-            wazuh.write_local_rules(original)
-        except Exception:  # noqa: BLE001
-            log.exception("rollback also failed")
-        return err(f"verifyconf failed (rolled back): {verify_out[-500:]}", 400)
+            original = wazuh.read_local_rules()
+        except Exception as e:  # noqa: BLE001
+            return err(f"cannot read local_rules.xml: {e}", 500)
 
-    ok_restart, restart_out = wazuh.restart_manager()
-    if not ok_restart:
-        return err(f"manager restart failed: {restart_out[-500:]}", 500)
+        new_rid = wazuh.next_local_rule_id(original)
+        snippet = wazuh.build_suppression(rid, agent, desc, new_rid)
+        updated = wazuh.insert_into_group(original, snippet)
 
-    db.insert_fp(rid, agent, desc, new_rid, snippet)
-    db.refresh_fp_alert_counts()
+        try:
+            wazuh.write_local_rules(updated)
+        except Exception as e:  # noqa: BLE001
+            return err(f"write failed: {e}", 500)
+
+        ok_verify, verify_out = wazuh.verify_config()
+        if not ok_verify:
+            # Roll back
+            try:
+                wazuh.write_local_rules(original)
+            except Exception:  # noqa: BLE001
+                log.exception("rollback also failed")
+            return err(f"verifyconf failed (rolled back): {verify_out[-500:]}", 400)
+
+        ok_restart, restart_out = wazuh.restart_manager()
+        if not ok_restart:
+            return err(f"manager restart failed: {restart_out[-500:]}", 500)
+
+        db.insert_fp(rid, agent, desc, new_rid, snippet)
+        db.refresh_fp_alert_counts()
     auth.audit("fp.add", "wazuh_rule", new_rid,
                {"suppresses": rid, "agent": agent, "description": desc})
     return ok({"new_rule_id": new_rid, "verify": verify_out,
@@ -769,21 +784,22 @@ def fp_delete(fp_id: int):
         row = c.execute("SELECT * FROM false_positives WHERE id=?", (fp_id,)).fetchone()
     if not row:
         return err("not found", 404)
-    try:
-        original = wazuh.read_local_rules()
-    except Exception as e:  # noqa: BLE001
-        return err(str(e), 500)
-    updated = wazuh.remove_rule_from_xml(original, row["wazuh_rule_id"])
-    try:
-        wazuh.write_local_rules(updated)
-    except Exception as e:  # noqa: BLE001
-        return err(f"write failed: {e}", 500)
-    ok_verify, verify_out = wazuh.verify_config()
-    if not ok_verify:
-        wazuh.write_local_rules(original)
-        return err(f"verifyconf failed (rolled back): {verify_out[-500:]}", 400)
-    wazuh.restart_manager()
-    db.delete_fp(fp_id)
+    with wazuh.LOCAL_RULES_LOCK:
+        try:
+            original = wazuh.read_local_rules()
+        except Exception as e:  # noqa: BLE001
+            return err(str(e), 500)
+        updated = wazuh.remove_rule_from_xml(original, row["wazuh_rule_id"])
+        try:
+            wazuh.write_local_rules(updated)
+        except Exception as e:  # noqa: BLE001
+            return err(f"write failed: {e}", 500)
+        ok_verify, verify_out = wazuh.verify_config()
+        if not ok_verify:
+            wazuh.write_local_rules(original)
+            return err(f"verifyconf failed (rolled back): {verify_out[-500:]}", 400)
+        wazuh.restart_manager()
+        db.delete_fp(fp_id)
     auth.audit("fp.delete", "wazuh_rule", row["wazuh_rule_id"],
                {"suppressed_rule": row["rule_id"]})
     return ok({"deleted": fp_id})
@@ -889,7 +905,9 @@ def dns_trend():
 
 @api_bp.route("/dns/sync", methods=["POST"])
 def dns_sync():
-    n = int_arg("days", 1)
+    # Cap days: each extra day is another in-memory bucket of Counters over a
+    # multi-hundred-MB tail, so an unbounded value is a self-inflicted OOM.
+    n = int_arg("days", 1, minimum=1, maximum=90)
     if n <= 1:
         return ok(sync.sync_dns_today())
     return ok({"days": sync.sync_dns_last_n(n)})
@@ -941,6 +959,7 @@ def settings_keys():
 
 @api_bp.route("/settings/keys/<service>", methods=["POST"])
 def settings_set_key(service: str):
+    if (resp := auth.require_admin()): return resp
     if service not in ("virustotal", "abuseipdb", "urlscan"):
         return err("unknown service", 404)
     p = request.get_json(silent=True) or {}
@@ -954,6 +973,7 @@ def settings_set_key(service: str):
 
 @api_bp.route("/settings/keys/<service>", methods=["DELETE"])
 def settings_clear_key(service: str):
+    if (resp := auth.require_admin()): return resp
     if service not in ("virustotal", "abuseipdb", "urlscan"):
         return err("unknown service", 404)
     osint.clear_key(service)
@@ -963,6 +983,7 @@ def settings_clear_key(service: str):
 
 @api_bp.route("/settings/keys/<service>/test", methods=["POST"])
 def settings_test_key(service: str):
+    if (resp := auth.require_admin()): return resp
     return jsonify(osint.test_key(service))
 
 
@@ -1294,6 +1315,7 @@ def pollers_status():
 
 @api_bp.route("/backup/download/<kind>")
 def backup_download(kind: str):
+    if (resp := auth.require_admin()): return resp
     if kind not in ("config", "full", "data"):
         return err("kind must be config|full|data")
     try:
@@ -1308,12 +1330,14 @@ def backup_download(kind: str):
 
 @api_bp.route("/backup/nas/config", methods=["GET"])
 def backup_nas_get():
+    if (resp := auth.require_admin()): return resp
     cfg = backup.nas_config_get()
     return ok(cfg or {})
 
 
 @api_bp.route("/backup/nas/config", methods=["POST"])
 def backup_nas_set():
+    if (resp := auth.require_admin()): return resp
     p = request.get_json(silent=True) or {}
     host = (p.get("host") or "").strip()
     user = (p.get("user") or "").strip()
@@ -1326,12 +1350,14 @@ def backup_nas_set():
 
 @api_bp.route("/backup/nas/config", methods=["DELETE"])
 def backup_nas_clear():
+    if (resp := auth.require_admin()): return resp
     backup.nas_config_clear()
     return ok({"cleared": True})
 
 
 @api_bp.route("/backup/nas/push", methods=["POST"])
 def backup_nas_push():
+    if (resp := auth.require_admin()): return resp
     p = request.get_json(silent=True) or {}
     kind = p.get("kind", "config")
     if kind not in ("config", "full"):
@@ -1348,12 +1374,14 @@ def backup_nas_push():
 
 @api_bp.route("/backup/history")
 def backup_history_get():
+    if (resp := auth.require_admin()): return resp
     rows = db.backup_list(50)
     return ok([dict(r) for r in rows])
 
 
 @api_bp.route("/settings/home-api", methods=["GET"])
 def home_api_status():
+    if (resp := auth.require_admin()): return resp
     token = auth.home_api_token_get()
     return ok({
         "configured":        bool(token),
@@ -1366,6 +1394,7 @@ def home_api_status():
 def home_api_generate():
     """Generate a fresh token. Returned ONCE here so the operator can copy it
     into the consumer (jacknet-home). Not retrievable afterwards."""
+    if (resp := auth.require_admin()): return resp
     token = auth.home_api_generate_token()
     auth.audit("settings.home_api_token_generate", "home_api", None)
     return ok({"token": token})
@@ -1373,6 +1402,7 @@ def home_api_generate():
 
 @api_bp.route("/settings/home-api/token", methods=["DELETE"])
 def home_api_clear():
+    if (resp := auth.require_admin()): return resp
     auth.home_api_token_clear()
     auth.audit("settings.home_api_token_clear", "home_api", None)
     return ok({"cleared": True})
@@ -1380,6 +1410,7 @@ def home_api_clear():
 
 @api_bp.route("/settings/home-api/mutations", methods=["POST"])
 def home_api_mutations():
+    if (resp := auth.require_admin()): return resp
     p = request.get_json(silent=True) or {}
     enabled = bool(p.get("enabled"))
     auth.home_api_set_mutations(enabled)
@@ -1408,6 +1439,7 @@ def host_config_get():
 
 @api_bp.route("/host-config", methods=["POST"])
 def host_config_set():
+    if (resp := auth.require_admin()): return resp
     p = request.get_json(silent=True) or {}
     allowed = {"wazuh_host", "wazuh_user", "claudedev_host", "claudedev_user",
                "adguard_host", "adguard_user", "adguard_querylog_path",
@@ -1426,6 +1458,7 @@ def host_config_set():
 @api_bp.route("/host-config/test", methods=["POST"])
 def host_config_test():
     """Run quick reachability checks against each configured host."""
+    if (resp := auth.require_admin()): return resp
     results: dict[str, dict] = {}
 
     cfg = config.host_config()
@@ -1473,6 +1506,7 @@ def host_config_test():
 
 @api_bp.route("/users")
 def users_list():
+    if (resp := auth.require_admin()): return resp
     rows = db.list_users()
     return ok([{"id": r["id"], "username": r["username"], "role": r["role"],
                 "created_at": r["created_at"], "last_login_at": r["last_login_at"],
@@ -1481,6 +1515,7 @@ def users_list():
 
 @api_bp.route("/users", methods=["POST"])
 def users_create():
+    if (resp := auth.require_admin()): return resp
     p = request.get_json(silent=True) or {}
     username = (p.get("username") or "").strip()
     password = p.get("password") or ""
@@ -1498,6 +1533,7 @@ def users_create():
 
 @api_bp.route("/users/<int:uid>", methods=["PATCH"])
 def users_update(uid: int):
+    if (resp := auth.require_admin()): return resp
     p = request.get_json(silent=True) or {}
     if p.get("password"):
         if len(p["password"]) < 8:
@@ -1512,6 +1548,7 @@ def users_update(uid: int):
 
 @api_bp.route("/users/<int:uid>", methods=["DELETE"])
 def users_delete(uid: int):
+    if (resp := auth.require_admin()): return resp
     me = auth.current_user()
     if me and me["id"] == uid:
         return err("cannot delete yourself")
@@ -1522,8 +1559,9 @@ def users_delete(uid: int):
 
 @api_bp.route("/audit-log")
 def audit_get():
+    if (resp := auth.require_admin()): return resp
     rows = db.audit_list(
-        limit=int_arg("limit", 200),
+        limit=int_arg("limit", 200, minimum=1, maximum=1000),
         action=request.args.get("action"),
         target_type=request.args.get("target_type"),
     )
@@ -1552,6 +1590,8 @@ def twofa_enroll():
     """Start enrollment: returns the secret + otpauth URI (2FA stays disabled
     until a code is confirmed). Re-enroll overwrites any pending secret."""
     u = auth.current_user()
+    if not u:
+        return err("not authenticated", 401)
     data = auth.totp_begin_enroll(u)
     auth.audit("user.2fa_enroll_start", "user", u["id"])
     return ok(data)
@@ -1560,6 +1600,8 @@ def twofa_enroll():
 @api_bp.route("/2fa/confirm", methods=["POST"])
 def twofa_confirm():
     u = auth.current_user()
+    if not u:
+        return err("not authenticated", 401)
     p = request.get_json(silent=True) or {}
     if auth.totp_confirm_enroll(u["id"], p.get("code") or ""):
         auth.audit("user.2fa_enabled", "user", u["id"])
@@ -1570,6 +1612,8 @@ def twofa_confirm():
 @api_bp.route("/2fa/disable", methods=["POST"])
 def twofa_disable():
     u = auth.current_user()
+    if not u:
+        return err("not authenticated", 401)
     p = request.get_json(silent=True) or {}
     if auth.totp_disable(u["id"], p.get("code") or ""):
         auth.audit("user.2fa_disabled", "user", u["id"])
@@ -1590,13 +1634,29 @@ def ai_usage():
 
 # ---------- webhooks API --------------------------------------------------
 
+def _webhook_url_hint(enc: str) -> str:
+    """Non-secret hint for the UI: the host only. Webhook URLs embed their
+    secret in the path/query (Slack/Discord/Mattermost tokens), so we must not
+    return any of the path — not even the last few characters."""
+    from urllib.parse import urlparse
+    url = config.decrypt(enc)
+    if url is None:
+        return "configured · (undecryptable on this host)"
+    host = ""
+    try:
+        host = urlparse(url).hostname or ""
+    except ValueError:
+        host = ""
+    return f"configured · {host}" if host else "configured"
+
+
 def _webhook_row_to_dict(w) -> dict:
     return {
         "id":            w["id"],
         "name":          w["name"],
         "platform":      w["platform"],
-        # never return the decrypted URL to the client
-        "url_hint":      "configured · ****" + (config.decrypt(w["url_encrypted"]) or "")[-6:],
+        # Host only — never any of the URL path/query (that's where the secret is)
+        "url_hint":      _webhook_url_hint(w["url_encrypted"]),
         "severity_min":  w["severity_min"],
         "include_ai":    bool(w["include_ai"]),
         "enabled":       bool(w["enabled"]),
@@ -1699,6 +1759,20 @@ def create_app() -> Flask:
     app = Flask(__name__,
                 static_folder="static",
                 template_folder="templates")
+
+    # Behind a reverse proxy, request.remote_addr is the proxy's IP — which would
+    # collapse the per-IP login throttle to a single global bucket (one client
+    # could lock out everyone) and poison audit-log attribution. Only trust
+    # X-Forwarded-For when an operator explicitly declares how many proxy hops
+    # are in front (SOC_TRUST_PROXY=N); default 0 = trust nothing (direct LAN).
+    trust_proxy = int(os.environ.get("SOC_TRUST_PROXY", "0"))
+    if trust_proxy > 0:
+        from werkzeug.middleware.proxy_fix import ProxyFix
+        app.wsgi_app = ProxyFix(app.wsgi_app, x_for=trust_proxy, x_proto=trust_proxy,
+                                x_host=trust_proxy, x_port=trust_proxy)
+        log.info("ProxyFix enabled — trusting %d proxy hop(s) for X-Forwarded-* "
+                 "(remote_addr now reflects the real client)", trust_proxy)
+
     app.secret_key = auth.get_or_create_secret_key()
     # Session cookies: 30 days, secure if behind HTTPS (set via env)
     from datetime import timedelta as _td
