@@ -708,10 +708,25 @@ cd /home/dev/projects/soc-dashboard
 rsync -az -R -e 'ssh -i ~/.ssh/collector_key' \
   <changed-files...> wazuh@10.0.0.213:/opt/dashboard/
 
+# DEPENDENCY SYNC — do this BEFORE the restart whenever a deploy introduces a
+# new import (a missing nh3/pyotp on the target venv crash-loops the service on
+# boot — happened 2026-06-04). The lock is the exact prod closure:
+ssh -i ~/.ssh/collector_key wazuh@10.0.0.213 \
+  '/opt/dashboard/venv/bin/pip install -r /opt/dashboard/requirements.lock'
+# (Skip if no new deps. After an intentional upgrade, regenerate the lock:
+#  ssh wazuh@10.0.0.213 '/opt/dashboard/venv/bin/pip freeze' > requirements.lock)
+
 # Restart only if Python changed (CSS/JS picked up on next page load):
 ssh -i ~/.ssh/collector_key wazuh@10.0.0.213 \
   'sudo -n /usr/bin/systemctl restart soc-dashboard.service'
 ```
+
+> **Gotcha (paid for in blood, 2026-06-04):** `git push` does NOT deploy, and a
+> target venv can lag the code. Pushing the hardening branch then restarting
+> crash-looped prod on `ModuleNotFoundError: nh3` because the venv predated the
+> nh3/pyotp deps. Always `pip install -r requirements.lock` on the target before
+> the restart. Also: never put tight upper-version pins in `requirements.txt` —
+> a `cryptography<46` ceiling silently downgraded prod's working 48.0.0.
 
 ### Recovery
 
