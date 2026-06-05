@@ -419,32 +419,54 @@ def latest_briefing(btype: str = "daily") -> sqlite3.Row | None:
 
 # ---------- alerts ----------
 
-def _populate_alert_mitre(c: sqlite3.Connection) -> int:
+def _populate_alert_mitre(c: sqlite3.Connection, batch: int = 5000) -> int:
     """Denormalise rule.mitre out of raw_json into alert_mitre for every alert
     that has no rows there yet. Every processed alert gets at least one row
     (an all-empty sentinel when the rule carries no MITRE metadata), so each
     call only touches alerts inserted since the last one — making this both
-    the one-time backfill (init_db) and the per-poll incremental hook."""
+    the one-time backfill (init_db) and the per-poll incremental hook.
+
+    Works in id-ordered batches inside explicit transactions: the connection
+    is autocommit (isolation_level=None), so an unwrapped executemany would
+    fsync per row — on a multi-hundred-MB prod DB that ground the disk for
+    minutes with the service unbound (deploy 2026-06-05). Batching also caps
+    memory at ~one batch of raw_json instead of fetchall()ing the table.
+    Each committed batch is durable progress: a restart mid-backfill resumes
+    where it left off (INSERT OR IGNORE + the NOT IN pending check)."""
     from parsers import extract_mitre
-    pending = c.execute(
-        "SELECT id, raw_json FROM alerts "
-        "WHERE id NOT IN (SELECT alert_id FROM alert_mitre)").fetchall()
-    rows: list[tuple[int, str, str, str]] = []
-    for r in pending:
+    total = 0
+    last_id = 0
+    while True:
+        pending = c.execute(
+            "SELECT id, raw_json FROM alerts "
+            "WHERE id > ? AND id NOT IN (SELECT alert_id FROM alert_mitre) "
+            "ORDER BY id LIMIT ?", (last_id, batch)).fetchall()
+        if not pending:
+            return total
+        last_id = pending[-1]["id"]
+        rows: list[tuple[int, str, str, str]] = []
+        for r in pending:
+            try:
+                raw = json.loads(r["raw_json"] or "{}")
+            except json.JSONDecodeError:
+                raw = {}
+            tuples = extract_mitre(raw) if isinstance(raw, dict) else []
+            if tuples:
+                rows.extend((r["id"], tid, tname, tac) for tid, tname, tac in tuples)
+            else:
+                rows.append((r["id"], "", "", ""))   # processed-but-unmapped sentinel
+        c.execute("BEGIN IMMEDIATE")
         try:
-            raw = json.loads(r["raw_json"] or "{}")
-        except json.JSONDecodeError:
-            raw = {}
-        tuples = extract_mitre(raw) if isinstance(raw, dict) else []
-        if tuples:
-            rows.extend((r["id"], tid, tname, tac) for tid, tname, tac in tuples)
-        else:
-            rows.append((r["id"], "", "", ""))     # processed-but-unmapped sentinel
-    if rows:
-        c.executemany(
-            "INSERT OR IGNORE INTO alert_mitre(alert_id,technique_id,technique,tactic) "
-            "VALUES(?,?,?,?)", rows)
-    return len(pending)
+            c.executemany(
+                "INSERT OR IGNORE INTO alert_mitre(alert_id,technique_id,technique,tactic) "
+                "VALUES(?,?,?,?)", rows)
+            c.execute("COMMIT")
+        except BaseException:
+            c.execute("ROLLBACK")
+            raise
+        total += len(pending)
+        if total > batch:   # only a real backfill is worth narrating, not pollers
+            log.info("alert_mitre backfill: %d alerts processed…", total)
 
 
 def insert_alert(a: dict[str, Any]) -> None:

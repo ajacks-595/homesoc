@@ -141,6 +141,28 @@ def test_backfill_existing_rows_idempotent(tmp_db):
     assert total == 1 and rows[0]["wazuh_id"] == "b1"
 
 
+def test_backfill_batched_and_resumable(tmp_db):
+    # 7 alerts, batch=2 → 4 batches; partial progress must resume cleanly
+    # (mirrors a service restart mid-backfill).
+    raw = {"rule": {"mitre": {"id": ["T1110"], "tactic": ["Credential Access"],
+                              "technique": ["Brute Force"]}}}
+    with db.conn() as c:
+        for i in range(7):
+            c.execute(
+                "INSERT INTO alerts(wazuh_id,timestamp,rule_id,rule_level,raw_json) "
+                "VALUES(?,?,'5710',10,?)", (f"bb{i}", _now(), json.dumps(raw)))
+        assert db._populate_alert_mitre(c, batch=2) == 7
+        assert db._populate_alert_mitre(c, batch=2) == 0
+        # simulate restart-mid-backfill: drop rows for the LAST two alerts only
+        c.execute("DELETE FROM alert_mitre WHERE alert_id IN "
+                  "(SELECT id FROM alerts WHERE wazuh_id IN ('bb5','bb6'))")
+        assert db._populate_alert_mitre(c, batch=2) == 2
+        n = c.execute("SELECT COUNT(DISTINCT alert_id) FROM alert_mitre").fetchone()[0]
+    assert n == 7
+    rows, total = db.query_alerts(mitre="T1110", statuses=None)
+    assert total == 7
+
+
 def test_mitre_filter_no_substring_false_positive(tmp_db):
     # A log line that merely *mentions* T1110 must not match the filter
     # (the old raw_json LIKE behaviour did).
