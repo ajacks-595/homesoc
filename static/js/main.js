@@ -687,6 +687,10 @@ const SOC = (() => {
     const _focus = qp.get("focus") ? parseInt(qp.get("focus"), 10) : NaN;
     alertsState.focusId = Number.isInteger(_focus) ? _focus : null;
     alertsState.mitre = qp.get("mitre") || null;
+    // ?statuses= pre-fills the status dropdown ("" = all). ATT&CK matrix and
+    // badge links pass it so the filtered list matches their all-status counts.
+    const st = qp.get("statuses");
+    if (st != null && stat && [...stat.options].some(o => o.value === st)) stat.value = st;
 
     await loadAlerts();
 
@@ -707,7 +711,7 @@ const SOC = (() => {
       <td><a href="/alerts?agent=${encodeURIComponent(a.agent_name || "")}">${escapeHtml(a.agent_name || "—")}</a></td>
       <td><a href="/alerts?rule_id=${encodeURIComponent(a.rule_id)}" class="mono">${escapeHtml(a.rule_id)}</a></td>
       <td class="mono">${a.rule_level}</td>
-      <td>${escapeHtml(fmt.short(a.rule_description, 110))}</td>
+      <td>${escapeHtml(fmt.short(a.rule_description, 110))}${mitreBadgesHtml(a)}</td>
       <td class="mono tiny">${escapeHtml(a.location || "")}</td>`;
     tr.addEventListener("click", e => {
       if (e.target.tagName === "A" || e.target.tagName === "INPUT") return;
@@ -791,7 +795,7 @@ const SOC = (() => {
          <td><a href="/alerts?agent=${encodeURIComponent(a.agent_name || "")}" class="agent-jump">${escapeHtml(a.agent_name || "—")}</a></td>
          <td><a href="#" class="rule-jump mono" data-rid="${escapeHtml(a.rule_id)}">${escapeHtml(a.rule_id)}</a></td>
          <td class="mono">${a.rule_level}</td>
-         <td>${badge}${escapeHtml(fmt.short(a.rule_description, 110))}</td>
+         <td>${badge}${escapeHtml(fmt.short(a.rule_description, 110))}${mitreBadgesHtml(a)}</td>
          <td class="mono tiny">${escapeHtml(a.location || "")}</td>`;
       tr.addEventListener("click", e => {
         if (e.target.tagName === "A" || e.target.tagName === "INPUT") return;
@@ -901,6 +905,7 @@ const SOC = (() => {
          </div>`;
 
     td.innerHTML = `
+      ${mitreExpandedHtml(a)}
       <div class="card-row cols-2">
         <div>${leftPanel}</div>
         <div>
@@ -1119,6 +1124,7 @@ const SOC = (() => {
   function exportAlerts() {
     const params = new URLSearchParams(Object.fromEntries(
       Object.entries(alertFiltersFromUi()).filter(([_, v]) => v && v !== "0")));
+    if (alertsState.mitre) params.set("mitre", alertsState.mitre);
     window.location = "/api/alerts/export?" + params.toString();
   }
 
@@ -1702,27 +1708,125 @@ const SOC = (() => {
     showTab();
     document.getElementById("dns-filter").addEventListener("change", renderDns);
     document.getElementById("dns-client").addEventListener("input", debounce(renderDns, 200));
+    document.querySelectorAll("#mitre-days button").forEach(b => b.addEventListener("click", () => {
+      mitreDays = parseInt(b.dataset.days, 10) || 7;
+      document.querySelectorAll("#mitre-days button").forEach(x => x.classList.toggle("active", x === b));
+      loadMitre();
+    }));
   }
 
+  // ---- MITRE ATT&CK -------------------------------------------------------
+  // Enterprise tactics in kill-chain order. Static public knowledge — embedded
+  // so the matrix layout is stable and absent tactics render as visible gaps,
+  // with no external data dependency (no-CDN convention).
+  const MITRE_TACTICS = [
+    "Reconnaissance", "Resource Development", "Initial Access", "Execution",
+    "Persistence", "Privilege Escalation", "Defense Evasion",
+    "Credential Access", "Discovery", "Lateral Movement", "Collection",
+    "Command and Control", "Exfiltration", "Impact",
+  ];
+
+  function mitreAttackUrl(tid) {
+    // T1548.003 → https://attack.mitre.org/techniques/T1548/003/
+    const m = /^(T\d+)(?:\.(\d+))?$/i.exec(tid || "");
+    return m
+      ? `https://attack.mitre.org/techniques/${m[1].toUpperCase()}/${m[2] ? m[2] + "/" : ""}`
+      : null;
+  }
+
+  // Normalised {ids, techniques, tactics} from an alert's rule.mitre, or null.
+  function mitreOf(a) {
+    const m = a.raw_json && a.raw_json.rule && a.raw_json.rule.mitre;
+    if (!m || typeof m !== "object") return null;
+    const arr = v => Array.isArray(v) ? v.map(String) : (v ? [String(v)] : []);
+    const out = { ids: arr(m.id), techniques: arr(m.technique), tactics: arr(m.tactic) };
+    return (out.ids.length || out.techniques.length || out.tactics.length) ? out : null;
+  }
+
+  // statuses= (empty → all) so the filtered list matches matrix/badge counts,
+  // which aggregate over every status.
+  const mitreFilterHref = v => `/alerts?mitre=${encodeURIComponent(v)}&statuses=`;
+
+  // Compact technique badges for an alert-table row.
+  function mitreBadgesHtml(a, max = 3) {
+    const m = mitreOf(a);
+    if (!m) return "";
+    const labels = m.ids.length ? m.ids : m.techniques;
+    if (!labels.length) return "";
+    const shown = labels.slice(0, max);
+    const more = labels.length - shown.length;
+    return shown.map((x, i) => {
+      const name = m.ids.length ? (m.techniques[i] || "") : "";
+      return ` <a class="badge mitre" href="${mitreFilterHref(x)}"
+                  title="ATT&CK${name ? ": " + escapeHtml(name) : ""} — click to filter">${escapeHtml(x)}</a>`;
+    }).join("") + (more > 0 ? ` <span class="badge mitre" title="${more} more technique(s) — expand the row">+${more}</span>` : "");
+  }
+
+  // Full tactic → technique line for the expanded alert panel, with
+  // attack.mitre.org reference links.
+  function mitreExpandedHtml(a) {
+    const m = mitreOf(a);
+    if (!m) return "";
+    const n = Math.max(m.ids.length, m.techniques.length);
+    const techs = [];
+    for (let i = 0; i < n; i++) {
+      const id = m.ids[i] || "", name = m.techniques[i] || "";
+      const ext = mitreAttackUrl(id);
+      techs.push(
+        `<a class="badge mitre" href="${mitreFilterHref(id || name)}" title="Filter alerts by this technique">`
+        + `${escapeHtml(name || id)}${id && name ? ` <span class="mono">${escapeHtml(id)}</span>` : ""}</a>`
+        + (ext ? `<a href="${ext}" target="_blank" rel="noopener" class="mitre-ext" title="Open ${escapeHtml(id)} on attack.mitre.org">↗</a>` : ""));
+    }
+    const tacs = m.tactics.map(t =>
+      `<a class="badge muted" href="${mitreFilterHref(t)}" title="Filter alerts by this tactic">${escapeHtml(t)}</a>`);
+    if (!techs.length && !tacs.length) return "";
+    return `<div class="mitre-line small">
+        <strong class="muted tiny">ATT&amp;CK</strong> ${tacs.join(" ")}${tacs.length && techs.length ? ' <span class="muted">→</span> ' : ""}${techs.join(" ")}
+      </div>`;
+  }
+
+  let mitreDays = 7;
+
   async function loadMitre() {
-    const r = await api("/api/mitre/summary?days=7");
+    const r = await api(`/api/mitre/summary?days=${mitreDays}`);
     if (!r.success) return;
     const d = r.data;
     const meta = document.getElementById("mitre-meta");
     if (meta) meta.textContent =
       `${fmt.int(d.alerts_with_mitre)} alerts with ATT&CK mapping in the last ${d.days} days`;
-    const rowHtml = (label, count) =>
-      `<tr><td><a href="/alerts?mitre=${encodeURIComponent(label)}">${escapeHtml(label)}</a></td>
-           <td class="right mono">${fmt.int(count)}</td></tr>`;
-    const fill = (id, items) => {
-      const body = document.querySelector(`#${id} tbody`);
-      if (!body) return;
-      body.innerHTML = items.length
-        ? items.map(t => rowHtml(t.name, t.count)).join("")
-        : `<tr><td colspan="2" class="muted small">No ATT&CK data in window.</td></tr>`;
-    };
-    fill("mitre-tactics", d.tactics || []);
-    fill("mitre-techniques", d.techniques || []);
+    renderMitreMatrix(d);
+  }
+
+  function renderMitreMatrix(d) {
+    const host = document.getElementById("mitre-matrix");
+    if (!host) return;
+    const matrix = d.matrix || {};
+    const tacticCounts = Object.fromEntries((d.tactics || []).map(t => [t.name, t.count]));
+    // Canonical kill-chain columns first, then any non-standard tactic names
+    // Wazuh emitted, then a trailing column for techniques with no tactic.
+    const extras = Object.keys(matrix).filter(t => t && !MITRE_TACTICS.includes(t)).sort();
+    const cols = [...MITRE_TACTICS, ...extras];
+    if (matrix[""]) cols.push("");
+    const max = Math.max(1, ...cols.flatMap(t => (matrix[t] || []).map(c => c.count)));
+    const heatCls = n => "heat-" + Math.min(4, Math.max(1, Math.ceil((4 * n) / max)));
+    host.innerHTML = cols.map(t => {
+      const cells = (matrix[t] || []).map(c => {
+        const label = c.name || c.id;
+        return `<a class="mitre-cell ${heatCls(c.count)}" href="${mitreFilterHref(c.id || c.name)}"
+                   title="${escapeHtml((c.id ? c.id + " — " : "") + label)} · ${fmt.int(c.count)} alert(s) — click to view">
+                  <span class="mitre-cell-name">${escapeHtml(label)}</span>
+                  <span class="mitre-cell-meta"><span class="mono">${escapeHtml(c.id)}</span><span>${fmt.int(c.count)}</span></span>
+                </a>`;
+      }).join("");
+      const count = t === "" ? null : tacticCounts[t];
+      const head = t === ""
+        ? "(no tactic)"
+        : (count ? `<a href="${mitreFilterHref(t)}">${escapeHtml(t)}</a>` : escapeHtml(t));
+      return `<div class="mitre-col${cells ? "" : " empty"}">
+          <div class="mitre-tactic">${head}<span class="mitre-tcount mono">${count != null ? fmt.int(count) : (cells ? "" : "—")}</span></div>
+          ${cells || `<div class="mitre-gap" title="No detections for this tactic in the window — visibility gap">no detections</div>`}
+        </div>`;
+    }).join("");
   }
 
   let dnsData = null;

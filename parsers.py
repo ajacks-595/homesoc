@@ -161,6 +161,43 @@ def parse_wazuh_alerts_stream(text: str) -> list[dict[str, Any]]:
     return out
 
 
+def extract_mitre(raw: dict[str, Any]) -> list[tuple[str, str, str]]:
+    """Extract (technique_id, technique_name, tactic) tuples from a raw Wazuh
+    alert's `rule.mitre` block.
+
+    Wazuh emits parallel `id`/`technique` arrays plus a separate `tactic`
+    array that may differ in length (one technique can belong to several
+    tactics, e.g. T1078 Valid Accounts → 4 tactics). We pair id[i]↔technique[i]
+    positionally and cross every pair with every tactic, which matches the
+    ATT&CK model for single-technique rules (the overwhelming majority) and
+    degrades to a useful over-approximation for multi-technique ones.
+    """
+    m = (raw.get("rule") or {}).get("mitre") or {}
+    if not isinstance(m, dict):
+        return []
+
+    def _aslist(v: Any) -> list[str]:
+        if isinstance(v, list):
+            return [str(x).strip() for x in v if str(x).strip()]
+        return [str(v).strip()] if v and str(v).strip() else []
+
+    ids = _aslist(m.get("id"))
+    techniques = _aslist(m.get("technique"))
+    tactics = _aslist(m.get("tactic")) or [""]
+    n = max(len(ids), len(techniques))
+    pairs = [(ids[i] if i < len(ids) else "",
+              techniques[i] if i < len(techniques) else "") for i in range(n)]
+    if not pairs:
+        pairs = [("", "")]
+    out = {
+        (tid, tname, tac)
+        for tid, tname in pairs
+        for tac in tactics
+        if tid or tname or tac
+    }
+    return sorted(out)
+
+
 # ---------- adguard querylog -----------------------------------------------
 
 def iter_adguard_lines(lines: Iterable[str]) -> Iterator[dict[str, Any]]:

@@ -523,6 +523,7 @@ def alerts_export():
         min_level=int_arg("min_level", minimum=0, maximum=16),
         group=request.args.get("group"),
         search=request.args.get("q"),
+        mitre=request.args.get("mitre"),
         limit=10000,
         with_total=False,   # CSV export discards the total → skip the COUNT scan
     )

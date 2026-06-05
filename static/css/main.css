@@ -512,3 +512,39 @@ tr.alert-expanded .card-row > div { min-width: 0; }    /* allow flex/grid childr
 @media (max-width: 1100px) {
   .soc-grid { grid-template-columns: 1fr; }
 }
+
+/* ---- MITRE ATT&CK matrix (threat intel) ----------------------------------*/
+.mitre-matrix { display: flex; gap: 6px; overflow-x: auto; align-items: stretch; padding: 2px; }
+.mitre-col { flex: 1 1 0; min-width: 104px; display: flex; flex-direction: column; gap: 4px; }
+.mitre-tactic {
+  display: flex; justify-content: space-between; gap: 4px; align-items: baseline;
+  font-size: 11px; font-weight: 600; padding: 2px 2px 4px;
+  border-bottom: 2px solid var(--border);
+}
+.mitre-tactic a { color: var(--text-primary); text-decoration: none; }
+.mitre-tactic a:hover { color: var(--accent); }
+.mitre-tcount { font-size: 10px; color: var(--text-secondary); }
+.mitre-col.empty .mitre-tactic { color: var(--text-secondary); opacity: 0.55; }
+.mitre-gap { font-size: 10px; font-style: italic; color: var(--text-secondary); opacity: 0.55; padding: 6px 2px; }
+.mitre-cell {
+  display: block; padding: 4px 6px; border-radius: 4px; font-size: 11px; line-height: 1.3;
+  background: var(--bg-secondary); border: 1px solid var(--border);
+  color: var(--text-primary); text-decoration: none;
+}
+.mitre-cell:hover { border-color: var(--accent); }
+.mitre-cell-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mitre-cell-meta { display: flex; justify-content: space-between; gap: 6px; font-size: 10px; color: var(--text-secondary); }
+.mitre-cell.heat-1 { background: color-mix(in srgb, var(--danger) 12%, var(--bg-secondary)); }
+.mitre-cell.heat-2 { background: color-mix(in srgb, var(--danger) 26%, var(--bg-secondary)); }
+.mitre-cell.heat-3 { background: color-mix(in srgb, var(--danger) 45%, var(--bg-secondary)); }
+.mitre-cell.heat-4 { background: color-mix(in srgb, var(--danger) 65%, var(--bg-secondary)); border-color: var(--danger); }
+.mitre-cell.heat-3, .mitre-cell.heat-4 { color: #fff; }
+.mitre-cell.heat-3 .mitre-cell-meta, .mitre-cell.heat-4 .mitre-cell-meta { color: rgba(255,255,255,0.8); }
+
+/* ATT&CK badges on alert rows + the expanded-panel tactic→technique line */
+.badge.mitre {
+  background: var(--bg-secondary); border: 1px solid var(--accent); color: var(--accent);
+  text-decoration: none; text-transform: none;
+}
+.mitre-line { margin-bottom: 10px; display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.mitre-ext { text-decoration: none; font-size: 11px; }

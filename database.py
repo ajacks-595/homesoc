@@ -52,6 +52,21 @@ CREATE INDEX IF NOT EXISTS idx_alerts_agent ON alerts(agent_name);
 CREATE INDEX IF NOT EXISTS idx_alerts_rule ON alerts(rule_id);
 CREATE INDEX IF NOT EXISTS idx_alerts_level ON alerts(rule_level);
 
+-- MITRE ATT&CK mapping denormalised out of alerts.raw_json (rule.mitre).
+-- One row per (alert, technique, tactic) pair; a single all-empty sentinel
+-- row marks an alert as processed-but-unmapped so the populate pass never
+-- re-parses it. Empty strings (not NULL) so the PK dedupes INSERT OR IGNORE.
+CREATE TABLE IF NOT EXISTS alert_mitre (
+    alert_id      INTEGER NOT NULL,
+    technique_id  TEXT    NOT NULL DEFAULT '',   -- e.g. T1110
+    technique     TEXT    NOT NULL DEFAULT '',   -- e.g. Brute Force
+    tactic        TEXT    NOT NULL DEFAULT '',   -- e.g. Credential Access
+    PRIMARY KEY (alert_id, technique_id, technique, tactic),
+    FOREIGN KEY (alert_id) REFERENCES alerts(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_alert_mitre_tech ON alert_mitre(technique_id);
+CREATE INDEX IF NOT EXISTS idx_alert_mitre_tactic ON alert_mitre(tactic);
+
 CREATE TABLE IF NOT EXISTS false_positives (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
     rule_id           TEXT    NOT NULL,     -- wazuh rule id being suppressed
@@ -334,6 +349,11 @@ def init_db() -> None:
         c.execute("CREATE INDEX IF NOT EXISTS idx_alerts_status_ts "
                   "ON alerts(status, timestamp DESC)")
         _seed_host_config_for_upgrade(c)
+        # One-time backfill of alert_mitre from existing raw_json (then a
+        # cheap no-op — every processed alert has at least a sentinel row).
+        n = _populate_alert_mitre(c)
+        if n:
+            log.info("alert_mitre: extracted ATT&CK mappings for %d alerts", n)
     # The DB holds Fernet-encrypted secrets + the signed-session key. Its key
     # material (/etc/machine-id) is world-readable, so a local user able to read
     # the DB file could derive those keys — keep the file (and WAL/SHM) owner-only.
@@ -399,6 +419,34 @@ def latest_briefing(btype: str = "daily") -> sqlite3.Row | None:
 
 # ---------- alerts ----------
 
+def _populate_alert_mitre(c: sqlite3.Connection) -> int:
+    """Denormalise rule.mitre out of raw_json into alert_mitre for every alert
+    that has no rows there yet. Every processed alert gets at least one row
+    (an all-empty sentinel when the rule carries no MITRE metadata), so each
+    call only touches alerts inserted since the last one — making this both
+    the one-time backfill (init_db) and the per-poll incremental hook."""
+    from parsers import extract_mitre
+    pending = c.execute(
+        "SELECT id, raw_json FROM alerts "
+        "WHERE id NOT IN (SELECT alert_id FROM alert_mitre)").fetchall()
+    rows: list[tuple[int, str, str, str]] = []
+    for r in pending:
+        try:
+            raw = json.loads(r["raw_json"] or "{}")
+        except json.JSONDecodeError:
+            raw = {}
+        tuples = extract_mitre(raw) if isinstance(raw, dict) else []
+        if tuples:
+            rows.extend((r["id"], tid, tname, tac) for tid, tname, tac in tuples)
+        else:
+            rows.append((r["id"], "", "", ""))     # processed-but-unmapped sentinel
+    if rows:
+        c.executemany(
+            "INSERT OR IGNORE INTO alert_mitre(alert_id,technique_id,technique,tactic) "
+            "VALUES(?,?,?,?)", rows)
+    return len(pending)
+
+
 def insert_alert(a: dict[str, Any]) -> None:
     with conn() as c:
         c.execute(
@@ -414,6 +462,7 @@ def insert_alert(a: dict[str, Any]) -> None:
                 json.dumps(a.get("raw") or {}),
             ),
         )
+        _populate_alert_mitre(c)
 
 
 def insert_alerts_bulk(items: Iterable[dict[str, Any]]) -> int:
@@ -437,6 +486,7 @@ def insert_alerts_bulk(items: Iterable[dict[str, Any]]) -> int:
                VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
             rows,
         )
+        _populate_alert_mitre(c)
         return cur.rowcount or 0
 
 
@@ -474,9 +524,14 @@ def query_alerts(*, date_from: str | None = None, date_to: str | None = None,
         q += " AND rule_groups LIKE ?"
         params.append(f"%\"{group}\"%")
     if mitre:
-        # MITRE technique/tactic/id substring match against the stored raw alert.
-        q += " AND raw_json LIKE ?"
-        params.append(f"%{mitre}%")
+        # Exact (case-insensitive) match on technique id, technique name, or
+        # tactic via the denormalised alert_mitre table — no raw_json LIKE, so
+        # log content that merely mentions "T1110" can't false-positive.
+        q += (" AND id IN (SELECT alert_id FROM alert_mitre"
+              " WHERE technique_id = ? COLLATE NOCASE"
+              " OR technique = ? COLLATE NOCASE"
+              " OR tactic = ? COLLATE NOCASE)")
+        params.extend([mitre, mitre, mitre])
     if search:
         q += " AND (full_log LIKE ? OR rule_description LIKE ? OR agent_name LIKE ?)"
         like = f"%{search}%"
@@ -494,41 +549,43 @@ def query_alerts(*, date_from: str | None = None, date_to: str | None = None,
     return rows, (int(total) if with_total else len(rows))
 
 
-def mitre_summary(days: int = 7, limit: int = 3000) -> dict[str, Any]:
-    """Aggregate MITRE ATT&CK tactic/technique/id counts from recent alerts'
-    stored raw_json (rule.mitre). Bounded by a time window + a LIKE pre-filter
-    so only mitre-bearing alerts are parsed (no schema change / backfill)."""
-    from collections import Counter
+def mitre_summary(days: int = 7) -> dict[str, Any]:
+    """Aggregate MITRE ATT&CK tactic/technique counts over the window from the
+    denormalised alert_mitre table (pure SQL — no raw_json re-parsing).
+
+    `matrix` groups techniques under each tactic for the heatmap view; the
+    flat `tactics` / `techniques` / `ids` lists are kept for API compat with
+    the pre-matrix summary shape. Counts are distinct alerts, so a
+    multi-tactic technique (T1078 → 4 tactics) counts once per cell but its
+    alert still counts once in `alerts_with_mitre`."""
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S")
-    tech: Counter = Counter()
-    tactic: Counter = Counter()
-    ids: Counter = Counter()
-    n = 0
+    base = ("FROM alert_mitre m JOIN alerts a ON a.id = m.alert_id "
+            "WHERE a.timestamp >= ? AND (m.technique_id != '' OR m.technique != '' OR m.tactic != '')")
     with conn() as c:
-        rows = c.execute(
-            "SELECT raw_json FROM alerts WHERE timestamp >= ? AND raw_json LIKE '%\"mitre\"%' "
-            "ORDER BY timestamp DESC LIMIT ?", (cutoff, limit)).fetchall()
-    for r in rows:
-        try:
-            raw = json.loads(r["raw_json"] or "{}")
-        except json.JSONDecodeError:
-            continue
-        m = (raw.get("rule") or {}).get("mitre") or {}
-        if not isinstance(m, dict):
-            continue
-        n += 1
-        for t in (m.get("technique") or []):
-            tech[t] += 1
-        for t in (m.get("tactic") or []):
-            tactic[t] += 1
-        for i in (m.get("id") or []):
-            ids[i] += 1
+        n = c.execute(f"SELECT COUNT(DISTINCT m.alert_id) {base}", (cutoff,)).fetchone()[0]
+        tactic_rows = c.execute(
+            f"SELECT m.tactic, COUNT(DISTINCT m.alert_id) AS n {base} AND m.tactic != '' "
+            "GROUP BY m.tactic ORDER BY n DESC", (cutoff,)).fetchall()
+        tech_rows = c.execute(
+            f"SELECT m.technique_id, m.technique, COUNT(DISTINCT m.alert_id) AS n {base} "
+            "AND (m.technique_id != '' OR m.technique != '') "
+            "GROUP BY m.technique_id, m.technique ORDER BY n DESC", (cutoff,)).fetchall()
+        cell_rows = c.execute(
+            f"SELECT m.tactic, m.technique_id, m.technique, COUNT(DISTINCT m.alert_id) AS n {base} "
+            "GROUP BY m.tactic, m.technique_id, m.technique ORDER BY n DESC", (cutoff,)).fetchall()
+    matrix: dict[str, list[dict[str, Any]]] = {}
+    for r in cell_rows:
+        matrix.setdefault(r["tactic"], []).append(
+            {"id": r["technique_id"], "name": r["technique"], "count": r["n"]})
     return {
         "days": days,
         "alerts_with_mitre": n,
-        "tactics":    [{"name": k, "count": v} for k, v in tactic.most_common(20)],
-        "techniques": [{"name": k, "count": v} for k, v in tech.most_common(20)],
-        "ids":        [{"id": k, "count": v} for k, v in ids.most_common(30)],
+        "tactics":    [{"name": r["tactic"], "count": r["n"]} for r in tactic_rows],
+        "techniques": [{"id": r["technique_id"], "name": r["technique"], "count": r["n"]}
+                       for r in tech_rows[:20]],
+        "ids":        [{"id": r["technique_id"], "count": r["n"]}
+                       for r in tech_rows if r["technique_id"]][:30],
+        "matrix":     matrix,
     }
 
 

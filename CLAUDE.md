@@ -588,6 +588,11 @@ service start, safe to repeat.
 **Core data:**
 - `alerts` — Wazuh alerts with status (`open` / `in_progress` /
   `tp_remediated` / `false_positive` / `acknowledged`), ack_notes, acked_at
+- `alert_mitre` — MITRE ATT&CK (technique_id, technique, tactic) tuples
+  denormalised out of `raw_json`'s `rule.mitre` at insert time (+ idempotent
+  startup backfill via `_populate_alert_mitre`; processed-but-unmapped alerts
+  get an all-empty sentinel row so they're never re-parsed). Powers the
+  matrix on /threat-intel, exact `mitre=` filtering, and per-alert badges
 - `briefings` — daily + weekly markdown briefings with assessment
 - `recommended_actions` — parsed P1/P2/P3 items, kanban-tracked
 - `false_positives` — Wazuh rule suppressions written to local_rules.xml

@@ -22,6 +22,10 @@ in case yours looks vaguely similar.
 - **Alert explorer** with filtering by severity / agent / rule / group / free
   text, resolution states (Open / In Progress / TP-Remediated / FP /
   Acknowledged), bulk actions, CSV export
+- **MITRE ATT&CK matrix** — Navigator-style tactic × technique heatmap built
+  from `rule.mitre` on stored alerts (no AI, no external data); per-alert
+  ATT&CK badges, exact technique/tactic filtering, visibility gaps shown
+  per tactic, links to attack.mitre.org
 - **AI-powered alert explanations** via the [Claude CLI](https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/overview)
   with WebSearch+WebFetch enabled, cross-correlating IPs/domains against
   other Wazuh alerts and DNS activity. Follow-up chat per alert.
