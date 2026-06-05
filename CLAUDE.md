@@ -872,6 +872,17 @@ listener.
     all stored API keys / webhook URLs / NAS config become un-decryptable
     and must be re-entered.
 
+14. **`db.conn()` is autocommit — bulk writes need an explicit transaction**
+    (2026-06-05). With `isolation_level=None`, a bare `executemany` commits
+    (and fsyncs) PER ROW. The alert_mitre backfill did this against prod's
+    219k-alert / 449MB table: ~775 fsyncs/s, disk at 91%, service unbound
+    for minutes, 2.6GB written. Wrap any multi-row write in
+    `BEGIN IMMEDIATE … COMMIT`, process in bounded batches (no `fetchall()`
+    of a whole table — dev's DB is 60× smaller than prod's, so "fast
+    locally" proves nothing), and make each batch durable/resumable so a
+    restart mid-run continues instead of starting over. See
+    `database._populate_alert_mitre` for the pattern.
+
 ## Project-specific repo review additions
 
 (Populated by `repo review` runs — additions appear here over time, with
