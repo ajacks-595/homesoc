@@ -2119,7 +2119,11 @@ const SOC = (() => {
       method: "PATCH", body: JSON.stringify({ status, notes }) });
     if (!r.success) { toast(r.error, "danger"); loadVulnMatches(); return; }
     toast("Status updated", "info");
+    // Refresh the active tab so a row that left the current status filter
+    // (e.g. resolved while viewing "Open") actually disappears instead of
+    // lingering until a manual reload.
     if (vulnTab === "dashboard") loadVulnDashboard();
+    else loadVulnMatches();
   }
 
   async function loadVulnDashboard() {

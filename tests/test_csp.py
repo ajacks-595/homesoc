@@ -38,7 +38,21 @@ def test_inline_script_nonce_matches_header(client):
 
 
 PAGES = ["/", "/alerts", "/briefings", "/osint", "/fp-manager",
-         "/actions", "/hosts", "/threat-intel", "/settings"]
+         "/actions", "/hosts", "/threat-intel", "/vulns", "/settings"]
+
+
+def test_html_is_no_store_static_is_cacheable(client):
+    """The per-request CSP nonce makes every HTML response unique, so HTML must
+    be Cache-Control: no-store — otherwise a cached body's stale nonce gets its
+    inline <script> blocked under a fresh CSP header (the /settings breakage,
+    2026-06-07). Static assets must stay cacheable."""
+    client.post("/setup", data={"username": "admin", "password": "supersecret"})
+    for path in ("/", "/vulns", "/settings"):
+        r = client.get(path)
+        assert r.headers.get("Cache-Control") == "no-store", (path, r.headers.get("Cache-Control"))
+    # a static asset keeps its own caching (no-store would defeat the point)
+    s = client.get("/static/js/main.js")
+    assert "no-store" not in (s.headers.get("Cache-Control") or "")
 
 
 def test_pages_have_no_inline_handlers_and_nonced_scripts(client):

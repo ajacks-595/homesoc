@@ -2042,6 +2042,15 @@ def create_app() -> Flask:
             "object-src 'none'; "
             "frame-ancestors 'none'; "
             "base-uri 'self'")
+        # Dynamic HTML embeds a PER-REQUEST CSP nonce, so it must never be
+        # cached: a browser/proxy that reuses a stale HTML body (old nonce)
+        # under a freshly-issued CSP header (new nonce) gets its inline
+        # <script> blocked, silently breaking page init — observed on
+        # /settings (audit log / users widgets blank, zero /api calls fired,
+        # 2026-06-07). Static assets (/static/*) keep their own long cache;
+        # only text/html is force-uncached here.
+        if (resp.content_type or "").startswith("text/html"):
+            resp.headers["Cache-Control"] = "no-store"
         if os.environ.get("SOC_COOKIE_SECURE", "0") == "1":
             resp.headers.setdefault(
                 "Strict-Transport-Security", "max-age=31536000; includeSubDomains")
