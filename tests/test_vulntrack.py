@@ -262,6 +262,33 @@ def test_rematch_prunes_retracted_but_not_touched(tmp_db):
     assert db.cve_match_get(mid)["status"] == "investigating"
 
 
+def test_cross_page_stub_dedup(auth_client, monkeypatch):
+    """Live prod finding: campaign names drift across daily summary tables
+    ("Mini Shai-Hulud" landed under 4 slug variants). A later page's
+    summary-only stub must not fork a new item when its slug overlaps a
+    known item's key or title-slug."""
+    import vulntrack
+    day1 = (
+        "## 📋 Summary\n"
+        "| # | CVE/Item | Severity | Affects | Status | Stack |\n|---|---|---|---|---|---|\n"
+        "| 1 | Mini Shai-Hulud — npm worm | CRITICAL 9.6 | npm | 🔴 Active | ⚠️ |\n\n"
+        "## 🔍 Deep Dives\n"
+        "### 1. Supply Chain: Mini Shai-Hulud — TeamPCP npm Worm\n"
+        "| | |\n|---|---|\n"
+        "| **CVE** | — |\n| **Severity** | 🔴 CRITICAL — CVSS 9.6 |\n"
+        "| **Affected** | 170+ npm packages |\n| **Status** | 🔴 Active campaign |\n")
+    day2 = (
+        "## 📋 Summary\n"
+        "| # | CVE/Item | Severity | Affects | Status | Stack |\n|---|---|---|---|---|---|\n"
+        "| 1 | Mini Shai-Hulud Worm (TeamPCP) | CRITICAL | npm | 🔴 Active | ⚠️ |\n\n"
+        "## 🔍 Deep Dives\n")
+    _mock_bookstack(monkeypatch, {1: day1, 2: day2})
+    res = vulntrack.sync_cve_briefings()
+    assert res["stubs_skipped"] == 1
+    keys = [r["item_key"] for r in db.cve_items_list()]
+    assert keys == ["mini-shai-hulud"]          # one item, not two
+
+
 def test_sync_unconfigured_skips(tmp_db):
     import vulntrack
     assert vulntrack.sync_cve_briefings()["skipped"] == "bookstack not configured"

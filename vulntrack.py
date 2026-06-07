@@ -385,7 +385,22 @@ def sync_cve_briefings() -> dict[str, Any]:
     book, pages = fetch_cve_pages()
     book_slug = book.get("slug") or "cve-deep-dives"
     stats = {"pages_seen": len(pages), "pages_processed": 0,
-             "items_new": 0, "items_updated": 0, "warnings": []}
+             "items_new": 0, "items_updated": 0, "stubs_skipped": 0,
+             "warnings": []}
+
+    # Campaign names drift day-to-day in summary tables ("Mini Shai-Hulud"
+    # arrived under 4 slug variants on prod), so a summary-only stub whose
+    # slug merely extends/contains an already-known item key or title-slug is
+    # a duplicate, not news. The parser dedupes within a page; this set
+    # dedupes across pages/days.
+    known: set[str] = set()
+    for row in db.cve_items_list(limit=1000):
+        known.add(row["item_key"])
+        known.add(parsers._cve_slugify(row["title"] or ""))
+
+    def _stub_is_redundant(key: str) -> bool:
+        return key not in known and any(
+            len(k) >= 6 and (k in key or key in k) for k in known)
 
     for p in sorted(pages, key=lambda x: x.get("id") or 0):
         seen = db.cve_page_get(p["id"])
@@ -403,10 +418,16 @@ def sync_cve_briefings() -> dict[str, Any]:
                     f"/page/{page.get('slug')}")
         briefing_date = (page.get("created_at") or "")[:10]
         for item in parsed["items"]:
+            if (not item.get("parse_ok") and not item["cve_ids"]
+                    and _stub_is_redundant(item["item_key"])):
+                stats["stubs_skipped"] += 1
+                continue
             _, created = db.cve_item_upsert(
                 item["item_key"], **_item_record(item, page, page_url, briefing_date))
             stats["items_new"] += created
             stats["items_updated"] += not created
+            known.add(item["item_key"])
+            known.add(parsers._cve_slugify(item["title"] or ""))
         db.cve_page_mark(p["id"], page.get("name") or "",
                          p.get("updated_at") or "", len(parsed["items"]))
         stats["pages_processed"] += 1
