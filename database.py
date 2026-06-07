@@ -1547,6 +1547,53 @@ def cve_match_mark_notified(match_id: int) -> None:
         c.execute("UPDATE cve_matches SET notified_at=? WHERE id=?", (now, match_id))
 
 
+# Days an open match may sit before it counts as overdue, by item severity.
+CVE_SLA_DAYS = {"critical": 7, "high": 14, "medium": 30, "low": 90, "unknown": 30}
+
+_CVE_SLA_SQL = ("CASE i.severity WHEN 'critical' THEN 7 WHEN 'high' THEN 14 "
+                "WHEN 'medium' THEN 30 WHEN 'low' THEN 90 ELSE 30 END")
+
+
+def cve_dashboard_stats() -> dict[str, Any]:
+    open_ph = ",".join("?" * len(CVE_OPEN_STATUSES))
+    closed = ("resolved", "accepted_risk", "not_applicable")
+    join = ("FROM cve_matches m JOIN cve_items i ON i.id = m.cve_item_id "
+            "JOIN assets a ON a.id = m.asset_id")
+    with conn() as c:
+        by_sev = c.execute(
+            f"SELECT i.severity, COUNT(*) AS n, MAX(m.priority) AS top "
+            f"{join} WHERE m.status IN ({open_ph}) GROUP BY i.severity",
+            CVE_OPEN_STATUSES).fetchall()
+        overdue = c.execute(
+            f"SELECT m.id, m.status, m.priority, m.created_at, i.item_key, i.title, "
+            f"i.severity, a.name AS asset_name, "
+            f"CAST(julianday('now') - julianday(m.created_at) AS INTEGER) AS age_days "
+            f"{join} WHERE m.status IN ({open_ph}) "
+            f"AND (julianday('now') - julianday(m.created_at)) > {_CVE_SLA_SQL} "
+            f"ORDER BY m.priority DESC LIMIT 50",
+            CVE_OPEN_STATUSES).fetchall()
+        recent = c.execute(
+            f"SELECT m.id, m.status, m.status_by, m.status_at, m.notes, i.item_key, "
+            f"i.title, i.severity, a.name AS asset_name "
+            f"{join} WHERE m.status IN ({','.join('?' * len(closed))}) "
+            f"AND m.status_at IS NOT NULL ORDER BY m.status_at DESC LIMIT 10",
+            closed).fetchall()
+        resolved_14d = c.execute(
+            f"SELECT COUNT(*) {join} WHERE m.status IN ({','.join('?' * len(closed))}) "
+            f"AND m.status_at >= datetime('now', '-14 days')", closed).fetchone()[0]
+    sev_map = {r["severity"]: {"open": r["n"], "top_priority": r["top"]} for r in by_sev}
+    return {
+        "open_total": sum(v["open"] for v in sev_map.values()),
+        "open_by_severity": sev_map,
+        "crit_high_open": sum(v["open"] for k, v in sev_map.items()
+                              if k in ("critical", "high")),
+        "overdue": [dict(r) for r in overdue],
+        "recently_resolved": [dict(r) for r in recent],
+        "resolved_14d": resolved_14d,
+        "sla_days": CVE_SLA_DAYS,
+    }
+
+
 def cve_page_get(page_id: int) -> sqlite3.Row | None:
     with conn() as c:
         return c.execute("SELECT * FROM cve_pages WHERE page_id=?",

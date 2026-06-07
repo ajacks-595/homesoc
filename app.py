@@ -1055,6 +1055,11 @@ def vulns_item_get(iid: int):
     return ok(d)
 
 
+@api_bp.route("/vulns/dashboard")
+def vulns_dashboard():
+    return ok(db.cve_dashboard_stats())
+
+
 @api_bp.route("/vulns/config")
 def vulns_config_get():
     if (resp := auth.require_admin()): return resp

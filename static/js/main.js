@@ -2111,8 +2111,53 @@ const SOC = (() => {
     if (vulnTab === "dashboard") loadVulnDashboard();
   }
 
-  // Filled in by the dashboard (Phase 3) layer.
-  async function loadVulnDashboard() {}
+  async function loadVulnDashboard() {
+    const r = await api("/api/vulns/dashboard");
+    if (!r.success) { toast(r.error, "danger"); return; }
+    const d = r.data;
+    document.getElementById("vd-open").textContent = fmt.int(d.open_total);
+    document.getElementById("vd-crit").textContent = fmt.int(d.crit_high_open);
+    document.getElementById("vd-overdue").textContent = fmt.int(d.overdue.length);
+    document.getElementById("vd-resolved").textContent = fmt.int(d.resolved_14d);
+
+    const sevOrder = ["critical", "high", "medium", "low", "unknown"];
+    const sevBody = document.querySelector("#vd-by-sev tbody");
+    const rows = sevOrder.filter(s => d.open_by_severity[s]);
+    sevBody.innerHTML = rows.length
+      ? rows.map(s => `<tr>
+          <td>${vulnSevBadge(s, null)}</td>
+          <td class="right mono">${fmt.int(d.open_by_severity[s].open)}</td>
+          <td class="right mono">${(d.open_by_severity[s].top_priority || 0).toFixed(1)}</td></tr>`).join("")
+      : `<tr><td colspan="3" class="muted small">Nothing open — either you're patched or you haven't synced yet.</td></tr>`;
+
+    const ovBody = document.querySelector("#vd-overdue-tbl tbody");
+    ovBody.innerHTML = d.overdue.length
+      ? d.overdue.map(o => `<tr>
+          <td><a href="/vulns?tab=matches">${escapeHtml(o.item_key)}</a>
+              <div class="tiny muted">${escapeHtml(fmt.short(o.title, 50))}</div></td>
+          <td>${escapeHtml(o.asset_name)}</td>
+          <td>${vulnSevBadge(o.severity, null)}</td>
+          <td class="right mono" title="SLA: ${d.sla_days[o.severity] || 30}d">${o.age_days}d</td>
+          <td>${escapeHtml(VULN_STATUS_LABELS[o.status] || o.status)}</td></tr>`).join("")
+      : `<tr><td colspan="5" class="muted small">Nothing overdue. 🎉</td></tr>`;
+
+    const rcBody = document.querySelector("#vd-recent-tbl tbody");
+    rcBody.innerHTML = d.recently_resolved.length
+      ? d.recently_resolved.map(x => `<tr>
+          <td>${escapeHtml(x.item_key)}
+              <div class="tiny muted">${escapeHtml(fmt.short(x.title, 50))}</div></td>
+          <td>${escapeHtml(x.asset_name)}</td>
+          <td>${vulnSevBadge(x.severity, null)}</td>
+          <td>${escapeHtml(VULN_STATUS_LABELS[x.status] || x.status)}${x.notes ? ` <span class="tiny muted" title="${escapeHtml(x.notes)}">📝</span>` : ""}</td>
+          <td>${escapeHtml(x.status_by || "—")}</td>
+          <td class="right tiny muted">${x.status_at ? fmt.age(x.status_at) : "—"}</td></tr>`).join("")
+      : `<tr><td colspan="6" class="muted small">No resolutions recorded yet.</td></tr>`;
+
+    const meta = document.getElementById("vuln-meta");
+    if (meta && vulnTab === "dashboard") {
+      meta.textContent = `${d.open_total} open · ${d.overdue.length} overdue · SLA crit ${d.sla_days.critical}d / high ${d.sla_days.high}d / med ${d.sla_days.medium}d / low ${d.sla_days.low}d`;
+    }
+  }
 
   let dnsData = null;
   async function loadDns() {
