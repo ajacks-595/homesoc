@@ -905,6 +905,13 @@ listener.
     locally" proves nothing), and make each batch durable/resumable so a
     restart mid-run continues instead of starting over. See
     `database._populate_alert_mitre` for the pattern.
+    **Read-side corollary (2026-06-07):** a per-poll pending-check like
+    `WHERE id NOT IN (SELECT … )` re-scans the whole table every call —
+    `LIMIT` bounds results, not the scan. On prod's 710MB alerts table that
+    was ~1.6GB of reads per service start (23 min to bind) and constant
+    "database is locked" poller noise. Track incremental work with a
+    high-water mark (`MAX(id)` over a table that's guaranteed a row per
+    processed unit), never a set-difference against the full table.
 
 ## Project-specific repo review additions
 
