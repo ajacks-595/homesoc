@@ -1,0 +1,11 @@
+[Unit]
+Description=SOC Dashboard CVE briefing sync timer (hourly)
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1h
+Unit=soc-dashboard-sync@cve.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target

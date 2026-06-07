@@ -982,6 +982,79 @@ def assets_import_vigil():
     return ok(res)
 
 
+@api_bp.route("/vulns/sync", methods=["POST"])
+def vulns_sync():
+    try:
+        res = vulntrack.sync_cve_briefings()
+    except RuntimeError as e:
+        return err(str(e))
+    except requests.RequestException as e:
+        return err(f"BookStack unreachable: {e}")
+    if res.get("skipped"):
+        return err(f"sync skipped: {res['skipped']}")
+    auth.audit("vulns.sync", "cve_sync", None,
+               {k: v for k, v in res.items() if k != "warnings"})
+    return ok(res)
+
+
+@api_bp.route("/vulns/matches")
+def vulns_matches():
+    raw_statuses = request.args.get("statuses")
+    if raw_statuses is None or raw_statuses == "open":
+        statuses: list[str] | None = list(db.CVE_OPEN_STATUSES)
+    elif raw_statuses == "":
+        statuses = None
+    else:
+        statuses = [s for s in raw_statuses.split(",") if s in db.CVE_MATCH_STATUSES]
+    rows = db.cve_matches_list(
+        statuses=statuses,
+        min_severity=request.args.get("min_severity") or None,
+        search=request.args.get("q") or None,
+        limit=int_arg("limit", 500, minimum=1, maximum=2000),
+    )
+    out = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d["cve_ids"] = json.loads(d.get("cve_ids") or "[]")
+        except json.JSONDecodeError:
+            d["cve_ids"] = []
+        out.append(d)
+    return ok(out)
+
+
+@api_bp.route("/vulns/matches/<int:mid>", methods=["PATCH"])
+def vulns_match_update(mid: int):
+    row = db.cve_match_get(mid)
+    if not row:
+        return err("not found", 404)
+    p = request.get_json(silent=True) or {}
+    status = p.get("status")
+    if status not in db.CVE_MATCH_STATUSES:
+        return err(f"status must be one of: {', '.join(db.CVE_MATCH_STATUSES)}")
+    notes = (p.get("notes") or "").strip() or None
+    user = auth.current_user()
+    db.cve_match_set_status(mid, status, notes, user["username"] if user else None)
+    auth.audit("vulns.match_status", "cve_match", mid,
+               {"item": row["item_key"], "asset": row["asset_name"],
+                "from": row["status"], "to": status})
+    return ok(dict(db.cve_match_get(mid)))
+
+
+@api_bp.route("/vulns/items/<int:iid>")
+def vulns_item_get(iid: int):
+    row = db.cve_item_get(iid)
+    if not row:
+        return err("not found", 404)
+    d = dict(row)
+    try:
+        d["cve_ids"] = json.loads(d.get("cve_ids") or "[]")
+    except json.JSONDecodeError:
+        d["cve_ids"] = []
+    d["section_html"] = render_md(d.get("section_md") or "")
+    return ok(d)
+
+
 @api_bp.route("/vulns/config")
 def vulns_config_get():
     if (resp := auth.require_admin()): return resp
@@ -1981,6 +2054,8 @@ def _cli_run_oneshot(kind: str) -> int:
         result = sync.sync_briefings()
     elif kind == "retention":
         result = sync.run_retention()
+    elif kind == "cve":
+        result = sync.sync_cve_briefings()
     elif kind == "bootstrap":
         result = sync.first_run_bootstrap()
     else:

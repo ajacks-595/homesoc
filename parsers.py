@@ -372,3 +372,208 @@ def detect_ioc_type(value: str) -> str:
 
 def briefing_word_count(content: str) -> int:
     return len(re.findall(r"\b\w+\b", content))
+
+
+# ---------- CVE briefing pages (BookStack "CVE Deep Dives") ------------------
+# The daily CVE-intel routine publishes a strictly-templated markdown page:
+# a Summary pipe-table, then "### N. <title>" deep-dive sections each opening
+# with a |**Field**|value| table and a "> ⚡ **Action:**" line. It is
+# LLM-generated, so parse tolerantly: never raise on a malformed section —
+# emit it with parse_ok=False and let the UI surface it for manual review.
+
+_CVE_RE = re.compile(r"CVE-\d{4}-\d{4,7}", re.IGNORECASE)
+_CVSS_SCORE_RE = re.compile(r"CVSS[^0-9]{0,12}(\d{1,2}\.\d)")
+_CVSS_VECTOR_RE = re.compile(r"((?:CVSS:3\.\d/)?AV:[NALP]/AC:[LH]/[A-Z:/]+)")
+_SEVERITIES = ("critical", "high", "medium", "low")
+
+
+def _cve_slugify(title: str) -> str:
+    """Stable-ish key for items with no CVE id (supply-chain campaigns).
+    Uses the segment before the first em-dash (usually the campaign name),
+    minus generic prefixes, so day-to-day title drift after the dash doesn't
+    fork the item."""
+    head = re.split(r"\s+[—–-]{1,2}\s+", title, maxsplit=1)[0]
+    head = re.sub(r"(?i)^(supply.chain|campaign|advisory)\s*:\s*", "", head).strip()
+    if not head:
+        head = title
+    slug = re.sub(r"[^a-z0-9]+", "-", head.lower()).strip("-")
+    return slug[:60] or "untitled"
+
+
+def _cve_norm_key(raw: str) -> str | None:
+    """Map briefing field labels (which drifted across template revisions —
+    'CVE' vs 'CVE ID', 'Status' vs 'Exploitation Status', …) to canonical keys."""
+    k = re.sub(r"[^a-z ]", "", raw.lower()).strip()
+    if k.startswith("cve"):
+        return "cve"
+    if k.startswith("severity"):
+        return "severity"
+    if k.startswith("affected"):
+        return "affected"
+    if "status" in k:
+        return "status"
+    if "stack" in k:
+        return "alexs stack"
+    if k.startswith("patch"):
+        return "patch"
+    return None
+
+
+def _cve_field_table(section: str) -> dict[str, str]:
+    """Parse the field block opening a deep-dive section. Two known formats:
+    |**Key**|value| table rows (current template) and '**Key:** value'
+    paragraph lines (pre-2026-05-28 template)."""
+    out: dict[str, str] = {}
+    for m in re.finditer(r"^\|\s*\*\*(.+?)\*\*\s*\|\s*(.+?)\s*\|\s*$",
+                         section, re.MULTILINE):
+        key = _cve_norm_key(m.group(1))
+        if key and key not in out:
+            out[key] = m.group(2).strip()
+    if not out:
+        for m in re.finditer(r"^\*\*(.+?):\*\*\s*(.+)$", section, re.MULTILINE):
+            key = _cve_norm_key(m.group(1))
+            if key and key not in out:
+                out[key] = m.group(2).strip()
+    return out
+
+
+def _cve_item_from_section(section: str, warnings: list[str]) -> dict[str, Any] | None:
+    header = section.splitlines()[0].strip()
+    title = re.sub(r"^\d+\.\s*", "", header).strip()
+    if not title:
+        return None
+    fields = _cve_field_table(section)
+
+    id_basis = title + " " + fields.get("cve", "")
+    cve_ids = list(dict.fromkeys(c.upper() for c in _CVE_RE.findall(id_basis)))
+    if not cve_ids:           # late ids buried in the body still count
+        cve_ids = list(dict.fromkeys(c.upper() for c in _CVE_RE.findall(section)))
+    item_key = cve_ids[0] if cve_ids else _cve_slugify(title)
+
+    sev_basis = fields.get("severity", "") + " " + title
+    severity = next((s for s in _SEVERITIES if re.search(rf"\b{s}\b", sev_basis,
+                                                         re.IGNORECASE)), "unknown")
+    if severity == "unknown":
+        warnings.append(f"{item_key}: no severity parsed")
+
+    score = None
+    m = _CVSS_SCORE_RE.search(fields.get("severity", "")) or _CVSS_SCORE_RE.search(section)
+    if m:
+        try:
+            v = float(m.group(1))
+            score = v if 0 <= v <= 10 else None
+        except ValueError:
+            pass
+    vec = _CVSS_VECTOR_RE.search(fields.get("severity", "") + " " + section)
+
+    status_text = fields.get("status", "")
+    exploited_basis = status_text + " " + title
+    exploited = bool(re.search(
+        r"(?i)actively exploit|exploited in the wild|active campaign|🔴",
+        exploited_basis))
+    kev = bool(re.search(r"\bKEV\b", status_text + " " + fields.get("severity", "")))
+
+    stack_raw = fields.get("alexs stack", "") or fields.get("alex s stack", "")
+    stack_flag = ("yes" if "✅" in stack_raw else
+                  "check" if "⚠" in stack_raw else
+                  "no" if "❌" in stack_raw else None)
+
+    action = None
+    am = re.search(r"^>\s*⚡\s*\*\*Action:?\*\*:?\s*(.+)$", section, re.MULTILINE)
+    if am:
+        action = am.group(1).strip()
+
+    return {
+        "item_key": item_key,
+        "cve_ids": cve_ids,
+        "title": title,
+        "severity": severity,
+        "cvss_score": score,
+        "cvss_vector": vec.group(1) if vec else None,
+        "status_label": status_text or None,
+        "exploited": exploited,
+        "kev": kev,
+        "stack_flag": stack_flag,
+        "affected_detail": fields.get("affected") or None,
+        "patch": fields.get("patch") or None,
+        "action": action,
+        "section_md": section.strip(),
+        "parse_ok": bool(fields),     # a section with no field table needs eyes
+    }
+
+
+def parse_cve_briefing(md: str) -> dict[str, Any]:
+    """Parse one CVE-briefing page into items. Returns
+    {"items": [...], "warnings": [...]} — malformed content degrades to
+    parse_ok=False items / warnings, never an exception."""
+    warnings: list[str] = []
+    items: list[dict[str, Any]] = []
+
+    # Deep-dive sections: every "### " block between the Deep Dives heading
+    # and the next "## " heading (Watch List etc.).
+    dd = re.search(r"^##[^\n#]*Deep Dives?\s*$", md, re.MULTILINE | re.IGNORECASE)
+    body = md[dd.end():] if dd else md
+    nxt = re.search(r"^## ", body, re.MULTILINE)
+    if nxt:
+        body = body[: nxt.start()]
+    sections = re.split(r"^###\s+", body, flags=re.MULTILINE)[1:]
+    for sec in sections:
+        try:
+            item = _cve_item_from_section(sec, warnings)
+        except Exception as e:  # noqa: BLE001 — tolerate any single bad section
+            warnings.append(f"section parse failed: {e}")
+            item = None
+        if item:
+            items.append(item)
+
+    # Summary table: enrich matched items with the Affects cell; emit
+    # summary-only rows (no deep dive) as parse_ok=False stubs so nothing
+    # silently disappears.
+    seen_keys = {i["item_key"] for i in items}
+    summ = re.search(r"^##[^\n#]*Summary\s*$", md, re.MULTILINE | re.IGNORECASE)
+    if summ:
+        tbl = md[summ.end():]
+        stop = re.search(r"^## ", tbl, re.MULTILINE)
+        if stop:
+            tbl = tbl[: stop.start()]
+        for line in tbl.splitlines():
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            if len(cells) < 5 or not cells[0].isdigit():
+                continue
+            _, name_c, sev_c, affects_c, status_c = cells[:5]
+            stack_c = cells[5] if len(cells) > 5 else ""
+            row_ids = [c.upper() for c in _CVE_RE.findall(name_c)]
+            key = row_ids[0] if row_ids else _cve_slugify(
+                re.sub(r"\*\*", "", name_c))
+            hit = next((i for i in items
+                        if i["item_key"] == key or
+                        (row_ids and set(row_ids) & set(i["cve_ids"])) or
+                        _cve_slugify(i["title"]) == key), None)
+            if hit:
+                hit.setdefault("affects", affects_c)
+                if not hit.get("status_label"):
+                    hit["status_label"] = status_c
+            elif key not in seen_keys:
+                warnings.append(f"{key}: in summary table but no deep-dive section")
+                severity = next((s for s in _SEVERITIES
+                                 if re.search(rf"\b{s}\b", sev_c, re.IGNORECASE)),
+                                "unknown")
+                sm = _CVSS_SCORE_RE.search(sev_c) or re.search(r"(\d{1,2}\.\d)", sev_c)
+                items.append({
+                    "item_key": key, "cve_ids": row_ids,
+                    "title": re.sub(r"\*\*", "", name_c),
+                    "severity": severity,
+                    "cvss_score": float(sm.group(1)) if sm else None,
+                    "cvss_vector": None, "status_label": status_c,
+                    "exploited": bool(re.search(r"(?i)exploit|active campaign|🔴", status_c)),
+                    "kev": "KEV" in status_c.upper(),
+                    "stack_flag": ("yes" if "✅" in stack_c else
+                                   "check" if "⚠" in stack_c else
+                                   "no" if "❌" in stack_c else None),
+                    "affects": affects_c, "affected_detail": None,
+                    "patch": None, "action": None,
+                    "section_md": line.strip(), "parse_ok": False,
+                })
+                seen_keys.add(key)
+
+    return {"items": items, "warnings": warnings}

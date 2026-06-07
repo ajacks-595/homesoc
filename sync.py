@@ -408,6 +408,7 @@ _POLL_DNS_S       = int(_os.environ.get("SOC_POLL_DNS_S",       "3600"))   # 1 h
 _POLL_AGENTS_S    = int(_os.environ.get("SOC_POLL_AGENTS_S",    "900"))    # 15 min
 _POLL_BRIEFINGS_S = int(_os.environ.get("SOC_POLL_BRIEFINGS_S", "3600"))   # 1 hour
 _POLL_RETENTION_S = int(_os.environ.get("SOC_POLL_RETENTION_S", "86400"))  # daily
+_POLL_CVE_S       = int(_os.environ.get("SOC_POLL_CVE_S",       "3600"))   # 1 hour
 
 _pollers_started = False
 # Guards _poller_state (written by 4 poller threads, read by the Flask
@@ -419,7 +420,16 @@ _poller_state: dict[str, dict[str, object]] = {
     "agents":    {"last_run": None, "last_result": None, "last_error": None},
     "briefings": {"last_run": None, "last_result": None, "last_error": None},
     "retention": {"last_run": None, "last_result": None, "last_error": None},
+    "cve":       {"last_run": None, "last_result": None, "last_error": None},
 }
+
+
+def sync_cve_briefings() -> dict[str, object]:
+    """Pull new CVE-briefing pages from BookStack and (re)match against the
+    asset register. No-ops cleanly when BookStack isn't configured. Imported
+    lazily so vulntrack stays optional at import time."""
+    import vulntrack
+    return vulntrack.sync_cve_briefings()
 
 
 def _poller_loop(name: str, interval_s: int, fn) -> None:
@@ -462,9 +472,11 @@ def start_background_pollers() -> None:
     delayed(20, "agents",    _POLL_AGENTS_S,    sync_agent_status)
     delayed(40, "briefings", _POLL_BRIEFINGS_S, sync_briefings)
     delayed(60, "retention", _POLL_RETENTION_S, run_retention)
+    delayed(90, "cve",       _POLL_CVE_S,       sync_cve_briefings)
     log.info("background pollers scheduled (alerts %ds, dns %ds, agents %ds, "
-             "briefings %ds, retention %ds)",
-             _POLL_ALERTS_S, _POLL_DNS_S, _POLL_AGENTS_S, _POLL_BRIEFINGS_S, _POLL_RETENTION_S)
+             "briefings %ds, retention %ds, cve %ds)",
+             _POLL_ALERTS_S, _POLL_DNS_S, _POLL_AGENTS_S, _POLL_BRIEFINGS_S,
+             _POLL_RETENTION_S, _POLL_CVE_S)
 
 
 def poller_status() -> dict[str, object]:
@@ -476,7 +488,8 @@ def poller_status() -> dict[str, object]:
                        "dns_s":       _POLL_DNS_S,
                        "agents_s":    _POLL_AGENTS_S,
                        "briefings_s": _POLL_BRIEFINGS_S,
-                       "retention_s": _POLL_RETENTION_S},
+                       "retention_s": _POLL_RETENTION_S,
+                       "cve_s":       _POLL_CVE_S},
         "state":      state,
     }
 

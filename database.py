@@ -130,6 +130,69 @@ CREATE TABLE IF NOT EXISTS assets (
     updated_at  TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+-- CVE items extracted from the daily CVE-briefing pages (BookStack book
+-- "CVE Deep Dives"). One row per *item* — an item may carry several CVE ids
+-- (vendor clusters like the UniFi OS trio) and recurs across daily briefings,
+-- so item_key (primary CVE id, or a title slug for non-CVE items like supply-
+-- chain campaigns) dedupes and later briefings update in place.
+CREATE TABLE IF NOT EXISTS cve_items (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    item_key        TEXT    NOT NULL UNIQUE,
+    cve_ids         TEXT,                -- json array of every CVE id on the item
+    title           TEXT    NOT NULL,
+    severity        TEXT    NOT NULL DEFAULT 'unknown'
+        CHECK (severity IN ('critical','high','medium','low','unknown')),
+    cvss_score      REAL,
+    cvss_vector     TEXT,
+    status_label    TEXT,                -- raw exploitation-status text from the briefing
+    exploited       INTEGER NOT NULL DEFAULT 0,
+    kev             INTEGER NOT NULL DEFAULT 0,
+    stack_flag      TEXT,                -- yes / check / no (briefing's "Alex's Stack?")
+    affects         TEXT,                -- summary-table Affects cell
+    affected_detail TEXT,                -- deep-dive Affected row (versions)
+    action          TEXT,                -- the one-line ⚡ Action
+    patch           TEXT,                -- Patch row
+    section_md      TEXT,                -- full deep-dive markdown (display + re-parse)
+    bookstack_page_id INTEGER,
+    bookstack_url   TEXT,
+    briefing_date   TEXT,                -- date of the most recent briefing carrying it
+    parse_ok        INTEGER NOT NULL DEFAULT 1,
+    first_seen_at   TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_seen_at    TEXT
+);
+
+-- CVE item × asset matches, with confidence + reason (transparent matching)
+-- and the remediation workflow state.
+CREATE TABLE IF NOT EXISTS cve_matches (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    cve_item_id   INTEGER NOT NULL,
+    asset_id      INTEGER NOT NULL,
+    confidence    TEXT    NOT NULL CHECK (confidence IN ('cpe','strong','fuzzy')),
+    match_reason  TEXT,
+    priority      REAL    NOT NULL DEFAULT 0,
+    status        TEXT    NOT NULL DEFAULT 'new'
+        CHECK (status IN ('new','investigating','patching','resolved',
+                          'accepted_risk','not_applicable')),
+    notes         TEXT,
+    status_by     TEXT,
+    status_at     TEXT,
+    notified_at   TEXT,                  -- set when a webhook alert was dispatched
+    created_at    TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(cve_item_id, asset_id),
+    FOREIGN KEY (cve_item_id) REFERENCES cve_items(id) ON DELETE CASCADE,
+    FOREIGN KEY (asset_id)    REFERENCES assets(id)    ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_cve_matches_status ON cve_matches(status, priority DESC);
+
+-- BookStack pages already ingested (watermark for the poller).
+CREATE TABLE IF NOT EXISTS cve_pages (
+    page_id     INTEGER PRIMARY KEY,
+    name        TEXT,
+    updated_at  TEXT,                    -- BookStack's updated_at when last parsed
+    items_found INTEGER NOT NULL DEFAULT 0,
+    parsed_at   TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS hosts (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     ip              TEXT    NOT NULL UNIQUE,
@@ -1359,6 +1422,147 @@ def update_asset_fields(asset_id: int, **fields: Any) -> None:
 def asset_delete(asset_id: int) -> None:
     with conn() as c:
         c.execute("DELETE FROM assets WHERE id=?", (asset_id,))
+
+
+# ---------- CVE asset tracker: items / matches / page watermarks -----------
+
+CVE_MATCH_STATUSES = ("new", "investigating", "patching", "resolved",
+                      "accepted_risk", "not_applicable")
+CVE_OPEN_STATUSES = ("new", "investigating", "patching")
+
+_CVE_ITEM_FIELDS = (
+    "cve_ids", "title", "severity", "cvss_score", "cvss_vector", "status_label",
+    "exploited", "kev", "stack_flag", "affects", "affected_detail", "action",
+    "patch", "section_md", "bookstack_page_id", "bookstack_url", "briefing_date",
+    "parse_ok",
+)
+
+
+def cve_item_upsert(item_key: str, **fields: Any) -> tuple[int, bool]:
+    """Insert or update a briefing item by its stable key. Later briefings
+    refresh status/severity/links in place. Returns (id, created)."""
+    fields = {k: v for k, v in fields.items() if k in _CVE_ITEM_FIELDS}
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with conn() as c:
+        row = c.execute("SELECT id FROM cve_items WHERE item_key=?",
+                        (item_key,)).fetchone()
+        if row:
+            sets = ", ".join(f"{k}=?" for k in fields)
+            c.execute(f"UPDATE cve_items SET {sets}, last_seen_at=? WHERE id=?",
+                      (*fields.values(), now, row["id"]))
+            return int(row["id"]), False
+        cols = ", ".join(["item_key", *fields, "last_seen_at"])
+        marks = ", ".join("?" * (2 + len(fields)))
+        cur = c.execute(f"INSERT INTO cve_items({cols}) VALUES({marks})",
+                        (item_key, *fields.values(), now))
+        return int(cur.lastrowid or 0), True
+
+
+def cve_item_get(item_id: int) -> sqlite3.Row | None:
+    with conn() as c:
+        return c.execute("SELECT * FROM cve_items WHERE id=?", (item_id,)).fetchone()
+
+
+def cve_items_list(limit: int = 500) -> list[sqlite3.Row]:
+    with conn() as c:
+        return list(c.execute(
+            "SELECT * FROM cve_items ORDER BY last_seen_at DESC LIMIT ?",
+            (limit,)).fetchall())
+
+
+def cve_match_upsert(cve_item_id: int, asset_id: int, confidence: str,
+                     match_reason: str, priority: float) -> tuple[int, bool]:
+    """Create a match, or refresh confidence/reason/priority on an existing one
+    WITHOUT touching its workflow status — re-syncs must never reopen items an
+    analyst already resolved. Returns (id, created)."""
+    with conn() as c:
+        row = c.execute(
+            "SELECT id FROM cve_matches WHERE cve_item_id=? AND asset_id=?",
+            (cve_item_id, asset_id)).fetchone()
+        if row:
+            c.execute(
+                "UPDATE cve_matches SET confidence=?, match_reason=?, priority=? WHERE id=?",
+                (confidence, match_reason, priority, row["id"]))
+            return int(row["id"]), False
+        cur = c.execute(
+            "INSERT INTO cve_matches(cve_item_id, asset_id, confidence, match_reason, priority) "
+            "VALUES(?,?,?,?,?)",
+            (cve_item_id, asset_id, confidence, match_reason, priority))
+        return int(cur.lastrowid or 0), True
+
+
+def cve_match_get(match_id: int) -> sqlite3.Row | None:
+    with conn() as c:
+        return c.execute(
+            "SELECT m.*, i.item_key, i.title, i.severity, i.cvss_score, i.cve_ids, "
+            "       i.bookstack_url, i.action, i.exploited, i.kev, "
+            "       a.name AS asset_name, a.exposure, a.criticality "
+            "FROM cve_matches m JOIN cve_items i ON i.id = m.cve_item_id "
+            "JOIN assets a ON a.id = m.asset_id WHERE m.id=?",
+            (match_id,)).fetchone()
+
+
+def cve_matches_list(statuses: list[str] | None = None,
+                     min_severity: str | None = None,
+                     search: str | None = None,
+                     limit: int = 500) -> list[sqlite3.Row]:
+    q = ("SELECT m.*, i.item_key, i.title, i.severity, i.cvss_score, i.cve_ids, "
+         "       i.bookstack_url, i.action, i.exploited, i.kev, i.briefing_date, "
+         "       a.name AS asset_name, a.exposure, a.criticality "
+         "FROM cve_matches m JOIN cve_items i ON i.id = m.cve_item_id "
+         "JOIN assets a ON a.id = m.asset_id WHERE 1=1")
+    params: list[Any] = []
+    if statuses:
+        q += f" AND m.status IN ({','.join('?' * len(statuses))})"
+        params.extend(statuses)
+    if min_severity:
+        order = ("critical", "high", "medium", "low")
+        if min_severity in order:
+            allowed = order[: order.index(min_severity) + 1]
+            q += f" AND i.severity IN ({','.join('?' * len(allowed))})"
+            params.extend(allowed)
+    if search:
+        q += " AND (i.item_key LIKE ? OR i.title LIKE ? OR a.name LIKE ?)"
+        like = f"%{search}%"
+        params.extend([like, like, like])
+    q += " ORDER BY m.priority DESC, i.severity, m.created_at DESC LIMIT ?"
+    params.append(limit)
+    with conn() as c:
+        return list(c.execute(q, params).fetchall())
+
+
+def cve_match_set_status(match_id: int, status: str, notes: str | None,
+                         by: str | None) -> None:
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with conn() as c:
+        c.execute(
+            "UPDATE cve_matches SET status=?, "
+            "notes=COALESCE(?, notes), status_by=?, status_at=? WHERE id=?",
+            (status, notes, by, now, match_id))
+
+
+def cve_match_mark_notified(match_id: int) -> None:
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with conn() as c:
+        c.execute("UPDATE cve_matches SET notified_at=? WHERE id=?", (now, match_id))
+
+
+def cve_page_get(page_id: int) -> sqlite3.Row | None:
+    with conn() as c:
+        return c.execute("SELECT * FROM cve_pages WHERE page_id=?",
+                         (page_id,)).fetchone()
+
+
+def cve_page_mark(page_id: int, name: str, updated_at: str,
+                  items_found: int) -> None:
+    with conn() as c:
+        c.execute(
+            "INSERT INTO cve_pages(page_id, name, updated_at, items_found, parsed_at) "
+            "VALUES(?,?,?,?,CURRENT_TIMESTAMP) "
+            "ON CONFLICT(page_id) DO UPDATE SET name=excluded.name, "
+            "updated_at=excluded.updated_at, items_found=excluded.items_found, "
+            "parsed_at=CURRENT_TIMESTAMP",
+            (page_id, name, updated_at, items_found))
 
 
 def refresh_host_alert_counts() -> None:

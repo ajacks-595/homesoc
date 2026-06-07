@@ -2028,8 +2028,90 @@ const SOC = (() => {
     if (vulnTab === "matches") loadVulnMatches(); else if (vulnTab === "dashboard") loadVulnDashboard();
   }
 
-  // Filled in by the matching (Phase 2) and dashboard (Phase 3) layers.
-  async function loadVulnMatches() {}
+  const VULN_STATUS_LABELS = {
+    new: "New", investigating: "Investigating", patching: "Patching",
+    resolved: "Resolved", accepted_risk: "Accepted Risk",
+    not_applicable: "N/A · FP",
+  };
+
+  function vulnSevBadge(sev, score) {
+    const cls = sev === "critical" ? "vuln-sev-critical" : sev === "high" ? "vuln-sev-high" : "";
+    return `<span class="${cls}">${escapeHtml(sev || "?")}${score ? ` <span class="mono tiny">${score.toFixed(1)}</span>` : ""}</span>`;
+  }
+
+  async function loadVulnMatches() {
+    const params = new URLSearchParams();
+    const st = document.getElementById("vm-status")?.value;
+    if (st != null) params.set("statuses", st);
+    const sev = document.getElementById("vm-sev")?.value;
+    if (sev) params.set("min_severity", sev);
+    const q = document.getElementById("vm-q")?.value.trim();
+    if (q) params.set("q", q);
+    const r = await api("/api/vulns/matches?" + params.toString());
+    if (!r.success) { toast(r.error, "danger"); return; }
+    const tbody = document.querySelector("#vm-table tbody");
+    tbody.innerHTML = "";
+    if (!r.data.length) {
+      tbody.innerHTML = `<tr><td colspan="8" class="muted small">No matches for this filter.
+        New items arrive with the daily CVE briefing (hourly sync) — or hit ↻ Sync CVEs.</td></tr>`;
+    }
+    r.data.forEach(m => {
+      const flags = (m.exploited ? " 🔴" : "") + (m.kev ? ' <span class="badge danger" title="CISA Known Exploited Vulnerabilities">KEV</span>' : "");
+      const statusSel = `<select class="vm-status-set" data-id="${m.id}">${
+        Object.entries(VULN_STATUS_LABELS).map(([v, l]) =>
+          `<option value="${v}" ${m.status === v ? "selected" : ""}>${l}</option>`).join("")}</select>`;
+      const tr = el("tr");
+      tr.innerHTML = `
+        <td class="right mono ${m.priority >= 27 ? "priority-hot" : ""}" title="severity × exposure × criticality (+exploited/KEV)">${m.priority.toFixed(1)}</td>
+        <td><a href="#" class="vm-item" data-iid="${m.cve_item_id}" title="${escapeHtml(m.title)}">${escapeHtml(m.item_key)}</a>${flags}
+            <div class="tiny muted">${escapeHtml(fmt.short(m.title, 60))}</div></td>
+        <td>${escapeHtml(m.asset_name)} <span class="tiny muted">${escapeHtml(m.exposure)}/${escapeHtml(m.criticality)}</span></td>
+        <td>${vulnSevBadge(m.severity, m.cvss_score)}</td>
+        <td><span class="badge vuln-conf-${m.confidence}" title="${escapeHtml(m.match_reason || "")}">${m.confidence}</span></td>
+        <td>${statusSel}</td>
+        <td class="right tiny muted" title="${escapeHtml(m.created_at || "")}">${fmt.age(m.created_at)}</td>
+        <td>${m.bookstack_url ? `<a href="${escapeHtml(m.bookstack_url)}" target="_blank" rel="noopener" title="BookStack deep dive">📖</a>` : ""}</td>`;
+      tbody.appendChild(tr);
+    });
+    tbody.querySelectorAll(".vm-item").forEach(a_ =>
+      a_.addEventListener("click", e => { e.preventDefault(); vulnShowItem(a_.dataset.iid); }));
+    tbody.querySelectorAll(".vm-status-set").forEach(sel =>
+      sel.addEventListener("change", () => vulnSetStatus(sel.dataset.id, sel.value)));
+    const meta = document.getElementById("vuln-meta");
+    if (meta && vulnTab === "matches") meta.textContent = `${r.data.length} match(es)`;
+  }
+
+  async function vulnShowItem(iid) {
+    const r = await api("/api/vulns/items/" + iid);
+    if (!r.success) { toast(r.error, "danger"); return; }
+    const d = r.data;
+    openSidePanel(`
+      <h2>${escapeHtml(d.item_key)}</h2>
+      <div class="small" style="margin-bottom:6px">${escapeHtml(d.title)}</div>
+      <div class="tiny muted" style="margin-bottom:10px">
+        ${vulnSevBadge(d.severity, d.cvss_score)} ·
+        ${escapeHtml(d.status_label || "")} ·
+        last seen in briefing ${escapeHtml(d.briefing_date || "?")}
+        ${d.bookstack_url ? ` · <a href="${escapeHtml(d.bookstack_url)}" target="_blank" rel="noopener">open in BookStack ↗</a>` : ""}
+      </div>
+      ${d.action ? `<div class="card small" style="margin-bottom:8px">⚡ ${escapeHtml(d.action)}</div>` : ""}
+      ${d.parse_ok ? "" : `<div class="badge warn" style="margin-bottom:8px">partial parse — review the source page</div>`}
+      <div class="markdown small">${d.section_html || ""}</div>`);
+  }
+
+  async function vulnSetStatus(mid, status) {
+    let notes = null;
+    if (["resolved", "accepted_risk", "not_applicable"].includes(status)) {
+      notes = prompt(`Closing note for ${VULN_STATUS_LABELS[status]} (optional):`) || null;
+    }
+    const r = await api("/api/vulns/matches/" + mid, {
+      method: "PATCH", body: JSON.stringify({ status, notes }) });
+    if (!r.success) { toast(r.error, "danger"); loadVulnMatches(); return; }
+    toast("Status updated", "info");
+    if (vulnTab === "dashboard") loadVulnDashboard();
+  }
+
+  // Filled in by the dashboard (Phase 3) layer.
   async function loadVulnDashboard() {}
 
   let dnsData = null;
