@@ -153,7 +153,9 @@ def test_backfill_batched_and_resumable(tmp_db):
                 "VALUES(?,?,'5710',10,?)", (f"bb{i}", _now(), json.dumps(raw)))
         assert db._populate_alert_mitre(c, batch=2) == 7
         assert db._populate_alert_mitre(c, batch=2) == 0
-        # simulate restart-mid-backfill: drop rows for the LAST two alerts only
+        # simulate restart-mid-backfill: drop rows for the LAST two alerts.
+        # (Resume is high-water-mark based — a mid-backfill crash only ever
+        # leaves a missing SUFFIX, which is exactly what this models.)
         c.execute("DELETE FROM alert_mitre WHERE alert_id IN "
                   "(SELECT id FROM alerts WHERE wazuh_id IN ('bb5','bb6'))")
         assert db._populate_alert_mitre(c, batch=2) == 2

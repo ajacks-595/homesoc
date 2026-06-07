@@ -506,29 +506,30 @@ def latest_briefing(btype: str = "daily") -> sqlite3.Row | None:
 
 def _populate_alert_mitre(c: sqlite3.Connection, batch: int = 5000) -> int:
     """Denormalise rule.mitre out of raw_json into alert_mitre for every alert
-    that has no rows there yet. Every processed alert gets at least one row
-    (an all-empty sentinel when the rule carries no MITRE metadata), so each
-    call only touches alerts inserted since the last one — making this both
-    the one-time backfill (init_db) and the per-poll incremental hook.
+    above the high-water mark. Every processed alert gets at least one row
+    (an all-empty sentinel when the rule carries no MITRE metadata) and alert
+    ids are monotonic, so MAX(alert_id) is a sound floor: an O(1) index probe
+    instead of the previous `id NOT IN (…)` pending-check, which re-SCANNED
+    THE ENTIRE ALERTS TABLE on every poll (LIMIT bounds results, not the
+    scan) — ~1.6GB of reads per service start on prod's 710MB table and the
+    likely source of its all-day "database is locked" noise (2026-06-07).
 
-    Works in id-ordered batches inside explicit transactions: the connection
-    is autocommit (isolation_level=None), so an unwrapped executemany would
-    fsync per row — on a multi-hundred-MB prod DB that ground the disk for
-    minutes with the service unbound (deploy 2026-06-05). Batching also caps
-    memory at ~one batch of raw_json instead of fetchall()ing the table.
+    Works in id-ordered batches; commits per batch unless the caller already
+    holds a transaction (insert_alert/insert_alerts_bulk wrap their insert +
+    this call in one BEGIN IMMEDIATE — one fsync per poll, see gotcha 14).
     Each committed batch is durable progress: a restart mid-backfill resumes
-    where it left off (INSERT OR IGNORE + the NOT IN pending check)."""
+    from the new high-water mark."""
     from parsers import extract_mitre
     total = 0
-    last_id = 0
+    floor = c.execute(
+        "SELECT COALESCE(MAX(alert_id), 0) FROM alert_mitre").fetchone()[0]
     while True:
         pending = c.execute(
-            "SELECT id, raw_json FROM alerts "
-            "WHERE id > ? AND id NOT IN (SELECT alert_id FROM alert_mitre) "
-            "ORDER BY id LIMIT ?", (last_id, batch)).fetchall()
+            "SELECT id, raw_json FROM alerts WHERE id > ? ORDER BY id LIMIT ?",
+            (floor, batch)).fetchall()
         if not pending:
             return total
-        last_id = pending[-1]["id"]
+        floor = pending[-1]["id"]
         rows: list[tuple[int, str, str, str]] = []
         for r in pending:
             try:
@@ -540,14 +541,18 @@ def _populate_alert_mitre(c: sqlite3.Connection, batch: int = 5000) -> int:
                 rows.extend((r["id"], tid, tname, tac) for tid, tname, tac in tuples)
             else:
                 rows.append((r["id"], "", "", ""))   # processed-but-unmapped sentinel
-        c.execute("BEGIN IMMEDIATE")
+        own_txn = not c.in_transaction
+        if own_txn:
+            c.execute("BEGIN IMMEDIATE")
         try:
             c.executemany(
                 "INSERT OR IGNORE INTO alert_mitre(alert_id,technique_id,technique,tactic) "
                 "VALUES(?,?,?,?)", rows)
-            c.execute("COMMIT")
+            if own_txn:
+                c.execute("COMMIT")
         except BaseException:
-            c.execute("ROLLBACK")
+            if own_txn:
+                c.execute("ROLLBACK")
             raise
         total += len(pending)
         if total > batch:   # only a real backfill is worth narrating, not pollers
@@ -556,20 +561,26 @@ def _populate_alert_mitre(c: sqlite3.Connection, batch: int = 5000) -> int:
 
 def insert_alert(a: dict[str, Any]) -> None:
     with conn() as c:
-        c.execute(
-            """INSERT OR IGNORE INTO alerts
-               (wazuh_id,timestamp,agent_name,agent_ip,rule_id,rule_level,
-                rule_description,rule_groups,full_log,location,raw_json)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
-            (
-                a.get("wazuh_id"), a["timestamp"], a.get("agent_name"),
-                a.get("agent_ip"), a["rule_id"], a["rule_level"],
-                a.get("rule_description"), json.dumps(a.get("rule_groups") or []),
-                a.get("full_log"), a.get("location"),
-                json.dumps(a.get("raw") or {}),
-            ),
-        )
-        _populate_alert_mitre(c)
+        c.execute("BEGIN IMMEDIATE")     # one fsync for insert + mitre rows
+        try:
+            c.execute(
+                """INSERT OR IGNORE INTO alerts
+                   (wazuh_id,timestamp,agent_name,agent_ip,rule_id,rule_level,
+                    rule_description,rule_groups,full_log,location,raw_json)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    a.get("wazuh_id"), a["timestamp"], a.get("agent_name"),
+                    a.get("agent_ip"), a["rule_id"], a["rule_level"],
+                    a.get("rule_description"), json.dumps(a.get("rule_groups") or []),
+                    a.get("full_log"), a.get("location"),
+                    json.dumps(a.get("raw") or {}),
+                ),
+            )
+            _populate_alert_mitre(c)
+            c.execute("COMMIT")
+        except BaseException:
+            c.execute("ROLLBACK")
+            raise
 
 
 def insert_alerts_bulk(items: Iterable[dict[str, Any]]) -> int:
@@ -586,14 +597,24 @@ def insert_alerts_bulk(items: Iterable[dict[str, Any]]) -> int:
     if not rows:
         return 0
     with conn() as c:
-        cur = c.executemany(
-            """INSERT OR IGNORE INTO alerts
-               (wazuh_id,timestamp,agent_name,agent_ip,rule_id,rule_level,
-                rule_description,rule_groups,full_log,location,raw_json)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
-            rows,
-        )
-        _populate_alert_mitre(c)
+        # One transaction for the whole batch + its mitre rows: in autocommit
+        # mode an unwrapped executemany commits (and fsyncs) PER ROW — on the
+        # prod disk that's the difference between 1 flush and ~500 per poll
+        # (gotcha 14).
+        c.execute("BEGIN IMMEDIATE")
+        try:
+            cur = c.executemany(
+                """INSERT OR IGNORE INTO alerts
+                   (wazuh_id,timestamp,agent_name,agent_ip,rule_id,rule_level,
+                    rule_description,rule_groups,full_log,location,raw_json)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                rows,
+            )
+            _populate_alert_mitre(c)
+            c.execute("COMMIT")
+        except BaseException:
+            c.execute("ROLLBACK")
+            raise
         return cur.rowcount or 0
 
 
