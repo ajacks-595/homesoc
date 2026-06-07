@@ -108,6 +108,28 @@ CREATE TABLE IF NOT EXISTS osint_results (
 );
 CREATE INDEX IF NOT EXISTS idx_osint_lookup ON osint_results(ioc_value, source);
 
+-- CVE Asset Tracker: the software/product register CVEs are matched against.
+-- Distinct from `hosts` (live machines w/ Wazuh agents) — an asset is a
+-- product+version you run (nginx, UniFi OS, Proxmox VE), wherever it lives.
+CREATE TABLE IF NOT EXISTS assets (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT    NOT NULL UNIQUE,
+    vendor      TEXT,
+    product     TEXT,
+    version     TEXT,
+    category    TEXT    NOT NULL DEFAULT 'service'
+        CHECK (category IN ('os','hypervisor','container_app','network_device','service')),
+    exposure    TEXT    NOT NULL DEFAULT 'lan'
+        CHECK (exposure IN ('internet','lan','isolated')),
+    criticality TEXT    NOT NULL DEFAULT 'medium'
+        CHECK (criticality IN ('low','medium','high')),
+    cpe         TEXT,                -- optional cpe:2.3:... string for precise matching
+    notes       TEXT,
+    source      TEXT    NOT NULL DEFAULT 'manual',   -- manual / vigil
+    created_at  TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at  TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS hosts (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     ip              TEXT    NOT NULL UNIQUE,
@@ -1285,6 +1307,58 @@ def update_host_agent(ip: str, agent_id: str | None, status: str | None,
             "UPDATE hosts SET agent_id=?, agent_status=?, last_seen=? WHERE ip=?",
             (agent_id, status, last_seen, ip),
         )
+
+
+# ---------- CVE asset tracker: assets --------------------------------------
+
+ASSET_CATEGORIES = ("os", "hypervisor", "container_app", "network_device", "service")
+ASSET_EXPOSURES = ("internet", "lan", "isolated")
+ASSET_CRITICALITIES = ("low", "medium", "high")
+
+
+def assets_list() -> list[sqlite3.Row]:
+    with conn() as c:
+        return list(c.execute(
+            "SELECT * FROM assets ORDER BY "
+            "CASE exposure WHEN 'internet' THEN 0 WHEN 'lan' THEN 1 ELSE 2 END, "
+            "CASE criticality WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, "
+            "name COLLATE NOCASE").fetchall())
+
+
+def asset_get(asset_id: int) -> sqlite3.Row | None:
+    with conn() as c:
+        return c.execute("SELECT * FROM assets WHERE id=?", (asset_id,)).fetchone()
+
+
+def asset_insert(name: str, **fields: Any) -> int:
+    allowed = {"vendor", "product", "version", "category", "exposure",
+               "criticality", "cpe", "notes", "source"}
+    fields = {k: v for k, v in fields.items() if k in allowed}
+    cols = ", ".join(["name", *fields])
+    marks = ", ".join("?" * (1 + len(fields)))
+    with conn() as c:
+        cur = c.execute(f"INSERT INTO assets({cols}) VALUES({marks})",
+                        (name, *fields.values()))
+        return int(cur.lastrowid or 0)
+
+
+def update_asset_fields(asset_id: int, **fields: Any) -> None:
+    # Same allowlist-the-columns pattern as update_host_fields — values are
+    # parameterised, names are interpolated so they must be vetted here.
+    allowed = {"name", "vendor", "product", "version", "category", "exposure",
+               "criticality", "cpe", "notes"}
+    fields = {k: v for k, v in fields.items() if k in allowed}
+    if not fields:
+        return
+    cols = ", ".join(f"{k}=?" for k in fields)
+    with conn() as c:
+        c.execute(f"UPDATE assets SET {cols}, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                  (*fields.values(), asset_id))
+
+
+def asset_delete(asset_id: int) -> None:
+    with conn() as c:
+        c.execute("DELETE FROM assets WHERE id=?", (asset_id,))
 
 
 def refresh_host_alert_counts() -> None:

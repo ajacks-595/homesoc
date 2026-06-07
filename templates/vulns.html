@@ -1,0 +1,125 @@
+{% extends "base.html" %}
+{% block title %}CVE Tracker{% endblock %}
+{% block view_toggle %}{% endblock %}
+{% block body %}
+
+<div class="flex-row" style="justify-content:space-between; margin-bottom:14px">
+  <h1>CVE Asset Tracker</h1>
+  <div class="flex-row">
+    <div class="view-toggle" id="vuln-tabs">
+      <button data-tab="dashboard" class="{% if tab == 'dashboard' %}active{% endif %}">Dashboard</button>
+      <button data-tab="matches"   class="{% if tab == 'matches' %}active{% endif %}">Matches</button>
+      <button data-tab="assets"    class="{% if tab == 'assets' %}active{% endif %}">Assets</button>
+    </div>
+    <button class="secondary" data-act="vulnSync" title="Pull new CVE briefings from BookStack and re-match">↻ Sync CVEs</button>
+    <button class="ghost" data-act="vulnOpenConfig" title="Vigil / BookStack / alerting configuration (admin)">⚙</button>
+  </div>
+</div>
+<div class="muted small" id="vuln-meta" style="margin-bottom:10px"></div>
+
+<!-- ===== Dashboard ===== -->
+<div id="vuln-dashboard" class="{% if tab != 'dashboard' %}hidden{% endif %}">
+  <div class="card-row cols-4">
+    <div class="metric"><div class="label">Open Matches</div><div class="value mono" id="vd-open">—</div></div>
+    <div class="metric danger"><div class="label">Critical / High Open</div><div class="value mono" id="vd-crit">—</div></div>
+    <div class="metric warn"><div class="label">Overdue</div><div class="value mono" id="vd-overdue">—</div></div>
+    <div class="metric"><div class="label">Resolved (14d)</div><div class="value mono" id="vd-resolved">—</div></div>
+  </div>
+  <div class="card-row cols-2">
+    <div class="card">
+      <h2>Open by severity</h2>
+      <table class="data" id="vd-by-sev">
+        <thead><tr><th>Severity</th><th class="right">Open</th><th class="right">Top priority</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="card">
+      <h2>Overdue <span class="muted tiny">(open beyond SLA: crit 7d · high 14d · med 30d · low 90d)</span></h2>
+      <table class="data" id="vd-overdue-tbl">
+        <thead><tr><th>CVE</th><th>Asset</th><th>Sev</th><th class="right">Age</th><th>Status</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+  <div class="card">
+    <h2>Recently resolved</h2>
+    <table class="data" id="vd-recent-tbl">
+      <thead><tr><th>CVE</th><th>Asset</th><th>Sev</th><th>Outcome</th><th>By</th><th class="right">When</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ===== Matches ===== -->
+<div id="vuln-matches" class="{% if tab != 'matches' %}hidden{% endif %}">
+  <div class="flex-row" style="margin-bottom:8px">
+    <select id="vm-status">
+      <option value="open" selected>Open (new / investigating / patching)</option>
+      <option value="">All statuses</option>
+      <option value="new">New</option>
+      <option value="investigating">Investigating</option>
+      <option value="patching">Patching</option>
+      <option value="resolved">Resolved</option>
+      <option value="accepted_risk">Accepted Risk</option>
+      <option value="not_applicable">Not Applicable / FP</option>
+    </select>
+    <select id="vm-sev">
+      <option value="">Any severity</option>
+      <option value="critical">Critical only</option>
+      <option value="high">High +</option>
+      <option value="medium">Medium +</option>
+    </select>
+    <input type="text" id="vm-q" placeholder="Filter CVE / asset / title" style="min-width:200px">
+  </div>
+  <div class="card" style="padding:0">
+    <table class="data" id="vm-table">
+      <thead><tr>
+        <th class="right" title="severity × exposure × criticality, +50% if actively exploited">Priority</th>
+        <th>CVE / Item</th>
+        <th>Asset</th>
+        <th>Severity</th>
+        <th title="cpe = CPE-anchored · strong = product+version match · fuzzy = name similarity — check the reason">Confidence</th>
+        <th>Status</th>
+        <th class="right">First seen</th>
+        <th></th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+  <p class="muted small">Matching is a homelab tracking aid, not a scanner: confidence shows <em>why</em>
+     each match was made — judge fuzzy matches yourself. Items come from the daily CVE briefing
+     (BookStack → <em>CVE Deep Dives</em>); click a CVE for the full deep dive.</p>
+</div>
+
+<!-- ===== Assets ===== -->
+<div id="vuln-assets" class="{% if tab != 'assets' %}hidden{% endif %}">
+  <div class="flex-row" style="justify-content:flex-end; margin-bottom:8px">
+    <button class="secondary" data-act="vulnImportVigil" title="Seed draft assets from Vigil's monitored integrations (names only — fill vendor/product/version after)">⇣ Import from Vigil</button>
+    <button data-act="assetOpenAdd">+ Add Asset</button>
+  </div>
+  <div class="card" style="padding:0">
+    <table class="data" id="assets-table">
+      <thead><tr>
+        <th>Name</th>
+        <th>Vendor</th>
+        <th>Product</th>
+        <th>Version</th>
+        <th>Category</th>
+        <th>Exposure</th>
+        <th>Criticality</th>
+        <th title="Optional cpe:2.3:... string for precise matching">CPE</th>
+        <th>Notes</th>
+        <th></th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+  <p class="muted small">Assets are products you run, not machines (that's <a href="/hosts">Hosts</a>).
+     <strong>Vendor/product (or a CPE) is what CVE matching keys on</strong> — assets without either
+     are listed but never matched. Vigil imports arrive as drafts needing those fields.</p>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script nonce="{{ csp_nonce }}">SOC.initVulns({{ tab|tojson }});</script>
+{% endblock %}

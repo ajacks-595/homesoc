@@ -1829,6 +1829,209 @@ const SOC = (() => {
     }).join("");
   }
 
+  // ---- CVE Asset Tracker --------------------------------------------------
+
+  let vulnTab = "dashboard";
+
+  async function initVulns(tab) {
+    initThemePicker();
+    vulnTab = tab || "dashboard";
+    const showTab = () => {
+      document.querySelectorAll("#vuln-tabs button").forEach(b =>
+        b.classList.toggle("active", b.dataset.tab === vulnTab));
+      ["dashboard", "matches", "assets"].forEach(t =>
+        document.getElementById("vuln-" + t)?.classList.toggle("hidden", t !== vulnTab));
+      if (vulnTab === "assets") loadAssets();
+      else if (vulnTab === "matches") loadVulnMatches();
+      else loadVulnDashboard();
+    };
+    document.querySelectorAll("#vuln-tabs button").forEach(b =>
+      b.addEventListener("click", () => { vulnTab = b.dataset.tab; showTab(); }));
+    ["vm-status", "vm-sev"].forEach(id =>
+      document.getElementById(id)?.addEventListener("change", () => loadVulnMatches()));
+    document.getElementById("vm-q")?.addEventListener("input", debounce(() => loadVulnMatches(), 250));
+    showTab();
+  }
+
+  const ASSET_OPTS = {
+    category:    ["os", "hypervisor", "container_app", "network_device", "service"],
+    exposure:    ["internet", "lan", "isolated"],
+    criticality: ["low", "medium", "high"],
+  };
+
+  function assetSelect(field, current, id) {
+    const opts = ASSET_OPTS[field].map(o =>
+      `<option value="${o}" ${o === current ? "selected" : ""}>${o.replace("_", " ")}</option>`).join("");
+    return `<select class="inline-edit" data-id="${id}" data-field="${field}">${opts}</select>`;
+  }
+
+  async function loadAssets() {
+    const r = await api("/api/assets");
+    if (!r.success) { toast(r.error, "danger"); return; }
+    const tbody = document.querySelector("#assets-table tbody");
+    tbody.innerHTML = "";
+    if (!r.data.length) {
+      tbody.innerHTML = `<tr><td colspan="10" class="muted small">No assets yet —
+        add what you run (or seed names from Vigil), then fill vendor/product/version
+        so CVE matching has something to key on.</td></tr>`;
+    }
+    r.data.forEach(a => {
+      const draft = !a.product && !a.cpe;
+      const tr = el("tr", { className: draft ? "asset-draft" : "" });
+      tr.innerHTML = `
+        <td><input class="inline-edit" data-id="${a.id}" data-field="name" value="${escapeHtml(a.name)}"
+             title="${draft ? "Draft — no product/CPE, excluded from matching" : ""}">${draft ? ' <span class="badge warn" title="No product or CPE — excluded from CVE matching">draft</span>' : ""}</td>
+        <td><input class="inline-edit" data-id="${a.id}" data-field="vendor" value="${escapeHtml(a.vendor || "")}"></td>
+        <td><input class="inline-edit" data-id="${a.id}" data-field="product" value="${escapeHtml(a.product || "")}"></td>
+        <td><input class="inline-edit" data-id="${a.id}" data-field="version" value="${escapeHtml(a.version || "")}" style="max-width:90px"></td>
+        <td>${assetSelect("category", a.category, a.id)}</td>
+        <td>${assetSelect("exposure", a.exposure, a.id)}</td>
+        <td>${assetSelect("criticality", a.criticality, a.id)}</td>
+        <td><input class="inline-edit mono" data-id="${a.id}" data-field="cpe" value="${escapeHtml(a.cpe || "")}" placeholder="cpe:2.3:a:…"></td>
+        <td><input class="inline-edit" data-id="${a.id}" data-field="notes" value="${escapeHtml(a.notes || "")}"></td>
+        <td><button class="danger small" data-del="${a.id}">×</button></td>`;
+      tbody.appendChild(tr);
+    });
+    tbody.querySelectorAll(".inline-edit").forEach(inp => {
+      inp.addEventListener("change", () => {
+        api("/api/assets/" + inp.dataset.id, { method: "PATCH",
+          body: JSON.stringify({ [inp.dataset.field]: inp.value })})
+          .then(r => r.success ? toast("Saved", "info") : toast(r.error, "danger"));
+      });
+    });
+    tbody.querySelectorAll("[data-del]").forEach(b =>
+      b.addEventListener("click", () => {
+        if (!confirm("Delete this asset? Its tracked CVE matches are removed too.")) return;
+        api("/api/assets/" + b.dataset.del, { method: "DELETE" }).then(() => loadAssets());
+      }));
+    const meta = document.getElementById("vuln-meta");
+    if (meta && vulnTab === "assets") {
+      const drafts = r.data.filter(a => !a.product && !a.cpe).length;
+      meta.textContent = `${r.data.length} assets` + (drafts ? ` · ${drafts} draft (need product/CPE before matching)` : "");
+    }
+  }
+
+  function assetOpenAdd() {
+    const sel = (f) => `<select id="as-${f}">${ASSET_OPTS[f].map(o =>
+      `<option value="${o}">${o.replace("_", " ")}</option>`).join("")}</select>`;
+    openModal(`
+      <h2>Add Asset</h2>
+      <div class="flex-col">
+        <div><label>Name</label><input id="as-name" placeholder="e.g. nginx (reverse proxy)"></div>
+        <div class="flex-row">
+          <div style="flex:1"><label>Vendor</label><input id="as-vendor" placeholder="e.g. F5 / nginx"></div>
+          <div style="flex:1"><label>Product</label><input id="as-product" placeholder="e.g. nginx"></div>
+          <div style="width:110px"><label>Version</label><input id="as-version" placeholder="1.27.3"></div>
+        </div>
+        <div class="flex-row">
+          <div><label>Category</label>${sel("category")}</div>
+          <div><label>Exposure</label>${sel("exposure")}</div>
+          <div><label>Criticality</label>${sel("criticality")}</div>
+        </div>
+        <div><label>CPE <span class="muted tiny">(optional, for precise matching)</span></label>
+             <input id="as-cpe" class="mono" placeholder="cpe:2.3:a:nginx:nginx:1.27.3"></div>
+        <div><label>Notes</label><textarea id="as-notes"></textarea></div>
+      </div>
+      <div class="actions">
+        <button class="ghost" data-act="closeModal">Cancel</button>
+        <button data-act="assetSubmit">Save</button>
+      </div>`);
+  }
+
+  async function assetSubmit() {
+    const v = id => document.getElementById(id)?.value || "";
+    const body = {
+      name: v("as-name"), vendor: v("as-vendor"), product: v("as-product"),
+      version: v("as-version"), category: v("as-category"), exposure: v("as-exposure"),
+      criticality: v("as-criticality"), cpe: v("as-cpe"), notes: v("as-notes"),
+    };
+    const r = await api("/api/assets", { method: "POST", body: JSON.stringify(body) });
+    if (!r.success) { toast(r.error, "danger"); return; }
+    closeModal(); toast("Asset added", "info"); loadAssets();
+  }
+
+  async function vulnImportVigil() {
+    toast("Importing from Vigil…", "info");
+    const r = await api("/api/assets/import-vigil", { method: "POST" });
+    if (!r.success) { toast(r.error, "danger"); return; }
+    toast(`Imported ${r.data.imported} draft assets (${r.data.skipped} already present).`, "info");
+    loadAssets();
+  }
+
+  async function vulnOpenConfig() {
+    const r = await api("/api/vulns/config");
+    if (!r.success) { toast(r.error, "danger"); return; }
+    const c = r.data;
+    const secret = (id, isSet) =>
+      `<input id="${id}" type="password" placeholder="${isSet ? "(configured — leave blank to keep)" : "(not set)"}">`;
+    openModal(`
+      <h2>CVE Tracker Configuration</h2>
+      <div class="flex-col">
+        <h3 style="margin:6px 0 0">BookStack (CVE briefing source)</h3>
+        <div><label>BookStack URL</label><input id="vc-bs-url" value="${escapeHtml(c.bookstack_url)}" placeholder="https://bookstack.example.com"></div>
+        <div class="flex-row">
+          <div style="flex:1"><label>API Token ID</label><input id="vc-bs-tid" value="${escapeHtml(c.bookstack_token_id)}"></div>
+          <div style="flex:1"><label>API Token Secret</label>${secret("vc-bs-tsec", c.bookstack_token_secret_set)}</div>
+        </div>
+        <div class="flex-row">
+          <div style="flex:1"><label>CF Access Client ID <span class="muted tiny">(if proxied)</span></label><input id="vc-cf-id" value="${escapeHtml(c.cf_client_id)}"></div>
+          <div style="flex:1"><label>CF Access Client Secret</label>${secret("vc-cf-sec", c.cf_client_secret_set)}</div>
+        </div>
+        <div style="width:120px"><label>Book ID</label><input id="vc-book" type="number" value="${escapeHtml(String(c.book_id))}"></div>
+        <h3 style="margin:10px 0 0">Vigil (asset import)</h3>
+        <div class="flex-row">
+          <div style="flex:1"><label>Vigil URL</label><input id="vc-vg-url" value="${escapeHtml(c.vigil_url)}" placeholder="http://10.0.0.x:8400"></div>
+          <div style="flex:1"><label>API Key</label>${secret("vc-vg-key", c.vigil_api_key_set)}</div>
+        </div>
+        <h3 style="margin:10px 0 0">Alerting</h3>
+        <div class="flex-row">
+          <label class="flex-row" style="gap:6px"><input type="checkbox" id="vc-al-on" ${c.alert_enabled ? "checked" : ""}> Notify webhooks on new matches</label>
+          <div><label>Min severity</label>
+            <select id="vc-al-sev">${["critical", "high", "medium", "low"].map(s =>
+              `<option value="${s}" ${c.alert_min_severity === s ? "selected" : ""}>${s}</option>`).join("")}</select></div>
+        </div>
+        <div class="flex-row" id="vc-al-expo">
+          ${["internet", "lan", "isolated"].map(e =>
+            `<label class="flex-row" style="gap:4px"><input type="checkbox" value="${e}"
+              ${(c.alert_exposures || []).includes(e) ? "checked" : ""}> ${e}</label>`).join("")}
+        </div>
+      </div>
+      <div class="actions">
+        <button class="ghost" data-act="closeModal">Cancel</button>
+        <button data-act="vulnConfigSave">Save</button>
+      </div>`);
+  }
+
+  async function vulnConfigSave() {
+    const v = id => document.getElementById(id)?.value || "";
+    const body = {
+      bookstack_url: v("vc-bs-url"), bookstack_token_id: v("vc-bs-tid"),
+      bookstack_token_secret: v("vc-bs-tsec"),
+      cf_client_id: v("vc-cf-id"), cf_client_secret: v("vc-cf-sec"),
+      book_id: parseInt(v("vc-book"), 10) || 247,
+      vigil_url: v("vc-vg-url"), vigil_api_key: v("vc-vg-key"),
+      alert_enabled: document.getElementById("vc-al-on")?.checked || false,
+      alert_min_severity: v("vc-al-sev"),
+      alert_exposures: [...document.querySelectorAll("#vc-al-expo input:checked")].map(x => x.value),
+    };
+    const r = await api("/api/vulns/config", { method: "POST", body: JSON.stringify(body) });
+    if (!r.success) { toast(r.error, "danger"); return; }
+    closeModal(); toast("Configuration saved", "info");
+  }
+
+  async function vulnSync() {
+    toast("Syncing CVE briefings from BookStack…", "info");
+    const r = await api("/api/vulns/sync", { method: "POST" });
+    if (!r.success) { toast(r.error, "danger"); return; }
+    const d = r.data;
+    toast(`Synced: ${d.pages_processed} page(s), ${d.items_new} new / ${d.items_updated} updated items, ${d.matches_new} new matches.`, "info");
+    if (vulnTab === "matches") loadVulnMatches(); else if (vulnTab === "dashboard") loadVulnDashboard();
+  }
+
+  // Filled in by the matching (Phase 2) and dashboard (Phase 3) layers.
+  async function loadVulnMatches() {}
+  async function loadVulnDashboard() {}
+
   let dnsData = null;
   async function loadDns() {
     const r = await api("/api/dns/today");
@@ -2533,7 +2736,7 @@ const SOC = (() => {
 
   const PUBLIC = {
     initDashboard, initBriefings, initAlerts, initOsint, initFp, initActions,
-    initHosts, initThreatIntel, initSettings,
+    initHosts, initThreatIntel, initSettings, initVulns,
     // dashboard
     quickOsint, calNav,
     // briefings
@@ -2551,6 +2754,9 @@ const SOC = (() => {
     hostsRefresh, hostsOpenAdd, hostsSubmit,
     // dns
     dnsSync,
+    // cve tracker
+    vulnSync, vulnOpenConfig, vulnConfigSave, vulnImportVigil,
+    assetOpenAdd, assetSubmit,
     // settings
     pipelineRun, webhookOpenAdd, webhookSubmit,
     backupNasSave, backupNasClear, backupNasPush,

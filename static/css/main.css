@@ -548,3 +548,16 @@ tr.alert-expanded .card-row > div { min-width: 0; }    /* allow flex/grid childr
 }
 .mitre-line { margin-bottom: 10px; display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
 .mitre-ext { text-decoration: none; font-size: 11px; }
+
+/* ---- CVE Asset Tracker ----------------------------------------------------*/
+.asset-draft td { opacity: 0.75; }
+#assets-table input.inline-edit, #assets-table select.inline-edit { min-width: 60px; }
+.vuln-conf-cpe    { border-color: var(--accent-secondary); color: var(--accent-secondary); }
+.vuln-conf-strong { border-color: var(--accent); color: var(--accent); }
+.vuln-conf-fuzzy  { border-color: var(--warning); color: var(--warning); }
+.badge.vuln-conf-cpe, .badge.vuln-conf-strong, .badge.vuln-conf-fuzzy {
+  background: var(--bg-secondary); text-transform: none;
+}
+.vuln-sev-critical { color: var(--danger); font-weight: 700; }
+.vuln-sev-high     { color: var(--warning); font-weight: 600; }
+.priority-hot      { color: var(--danger); font-weight: 700; }

@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 
 import markdown as md_lib
 import nh3
+import requests
 from flask import (
     Blueprint, Flask, g, jsonify, render_template, request, send_file,
 )
@@ -25,6 +26,7 @@ import notifications
 import osint
 import parsers
 import sync
+import vulntrack
 import wazuh
 
 
@@ -206,6 +208,12 @@ def hosts_page():
 def ti_page():
     tab = request.args.get("tab", "dns")
     return render_template("threat_intel.html", theme=config.DEFAULT_THEME, tab=tab)
+
+
+@pages_bp.route("/vulns")
+def vulns_page():
+    tab = request.args.get("tab", "dashboard")
+    return render_template("vulns.html", theme=config.DEFAULT_THEME, tab=tab)
 
 
 @pages_bp.route("/settings")
@@ -884,6 +892,111 @@ def hosts_alerts(hid: int):
 def hosts_refresh():
     n = sync.sync_agent_status()
     return ok({"updated": n})
+
+
+# ---------- CVE asset tracker API ------------------------------------------
+
+@api_bp.route("/assets")
+def assets_list_api():
+    return ok([dict(r) for r in db.assets_list()])
+
+
+@api_bp.route("/assets", methods=["POST"])
+def assets_add():
+    p = request.get_json(silent=True) or {}
+    name = (p.get("name") or "").strip()
+    if not name:
+        return err("name required")
+    fields = _asset_fields_from(p)
+    if isinstance(fields, tuple):           # (error response)
+        return fields[0]
+    try:
+        aid = db.asset_insert(name, **fields)
+    except Exception:
+        return err("an asset with that name already exists")
+    auth.audit("asset.create", "asset", aid, {"name": name})
+    return ok(dict(db.asset_get(aid) or {}))
+
+
+@api_bp.route("/assets/<int:aid>", methods=["PATCH"])
+def assets_update(aid: int):
+    if not db.asset_get(aid):
+        return err("not found", 404)
+    p = request.get_json(silent=True) or {}
+    fields = _asset_fields_from(p, allow_name=True)
+    if isinstance(fields, tuple):
+        return fields[0]
+    if not fields:
+        return err("nothing to update")
+    db.update_asset_fields(aid, **fields)
+    auth.audit("asset.update", "asset", aid, {k: v for k, v in fields.items()})
+    return ok(dict(db.asset_get(aid) or {}))
+
+
+@api_bp.route("/assets/<int:aid>", methods=["DELETE"])
+def assets_delete(aid: int):
+    row = db.asset_get(aid)
+    if not row:
+        return err("not found", 404)
+    db.asset_delete(aid)
+    auth.audit("asset.delete", "asset", aid, {"name": row["name"]})
+    return ok({"deleted": aid})
+
+
+def _asset_fields_from(p: dict, allow_name: bool = False):
+    """Validate + collect asset fields from a request payload. Returns a dict,
+    or a 1-tuple wrapping an error response when validation fails."""
+    fields: dict = {}
+    if allow_name and "name" in p:
+        name = (p.get("name") or "").strip()
+        if not name:
+            return (err("name cannot be empty"),)
+        fields["name"] = name
+    for k in ("vendor", "product", "version", "cpe", "notes"):
+        if k in p:
+            fields[k] = (p.get(k) or "").strip() or None
+    if "category" in p:
+        if p["category"] not in db.ASSET_CATEGORIES:
+            return (err(f"category must be one of: {', '.join(db.ASSET_CATEGORIES)}"),)
+        fields["category"] = p["category"]
+    if "exposure" in p:
+        if p["exposure"] not in db.ASSET_EXPOSURES:
+            return (err(f"exposure must be one of: {', '.join(db.ASSET_EXPOSURES)}"),)
+        fields["exposure"] = p["exposure"]
+    if "criticality" in p:
+        if p["criticality"] not in db.ASSET_CRITICALITIES:
+            return (err(f"criticality must be one of: {', '.join(db.ASSET_CRITICALITIES)}"),)
+        fields["criticality"] = p["criticality"]
+    return fields
+
+
+@api_bp.route("/assets/import-vigil", methods=["POST"])
+def assets_import_vigil():
+    try:
+        res = vulntrack.import_assets_from_vigil()
+    except RuntimeError as e:
+        return err(str(e))
+    except requests.RequestException as e:
+        return err(f"Vigil unreachable: {e}")
+    auth.audit("asset.import_vigil", "asset", None, res)
+    return ok(res)
+
+
+@api_bp.route("/vulns/config")
+def vulns_config_get():
+    if (resp := auth.require_admin()): return resp
+    return ok(vulntrack.config_public())
+
+
+@api_bp.route("/vulns/config", methods=["POST"])
+def vulns_config_set():
+    if (resp := auth.require_admin()): return resp
+    p = request.get_json(silent=True) or {}
+    vulntrack.set_config(p)
+    auth.audit("vulns.config_update", "vuln_config", None,
+               {k: ("***" if k in vulntrack._SECRET_FIELDS else v)
+                for k, v in p.items()})
+    return ok(vulntrack.config_public())
 
 
 # ---------- DNS / Threat Intel API ---------------------------------------
