@@ -913,6 +913,26 @@ listener.
     high-water mark (`MAX(id)` over a table that's guaranteed a row per
     processed unit), never a set-difference against the full table.
 
+15. **The iterative rsync deploy (explicit file list) silently drifts
+    templates** (found 2026-06-07). The CSP hardening pass nonce-gated
+    `script-src` in `app.py` AND added `nonce="{{ csp_nonce }}"` + `data-act`
+    delegation to every template — but ad-hoc deploys only rsync'd the files
+    named in each change, so `app.py`'s nonce-CSP shipped while 8 templates
+    stayed on their pre-hardening versions (inline `onclick=`/nonce-less
+    `<script>`). Effect: those pages' inline init scripts were CSP-blocked on
+    prod — page data never loaded (Overview stats, Settings audit/users/
+    backups blank, zero `/api` calls) while the server was provably correct
+    (header nonce == body nonce in a fresh response). A browser acceptance
+    test caught it; the static `tests/test_csp.py` per-page nonce check
+    passes locally because LOCAL templates were fine — only prod had drifted.
+    Lessons: (a) after any CSP/template hardening, `rsync templates/`
+    wholesale, not file-by-file; (b) dynamic HTML carries a per-request nonce
+    so it MUST be `Cache-Control: no-store` (a cached body's stale nonce gets
+    blocked under a fresh header — now enforced in `_security_headers`);
+    (c) restart after template changes — Jinja caches compiled templates when
+    `debug=False`. Verify prod parity with
+    `for t in templates/*; do ssh … "cat /opt/dashboard/$t" | diff - $t; done`.
+
 ## Project-specific repo review additions
 
 (Populated by `repo review` runs — additions appear here over time, with
