@@ -1060,6 +1060,29 @@ def vulns_dashboard():
     return ok(db.cve_dashboard_stats())
 
 
+@api_bp.route("/vulns/alert-test", methods=["POST"])
+def vulns_alert_test():
+    """Fire a synthetic CVE-match notification at every enabled webhook so the
+    end-to-end path can be verified without waiting for a real match."""
+    if (resp := auth.require_admin()): return resp
+    sample = {
+        "item_key": "CVE-0000-TEST",
+        "title": "Synthetic CVE-match notification — configuration check",
+        "severity": "critical", "cvss_score": 9.9,
+        "asset_name": "test-asset", "exposure": "internet", "criticality": "high",
+        "priority": 54.0, "confidence": "strong",
+        "match_reason": "synthetic test fired from the CVE Tracker",
+        "action": "No action — this is a test.",
+        "exploited": True, "kev": False,
+        "bookstack_url": None,
+    }
+    results = notifications.deliver_vuln_match(sample)
+    auth.audit("vulns.alert_test", "webhook", None,
+               {"results": [{k: v for k, v in r.items() if k != "response"}
+                            for r in results]})
+    return ok({"results": results})
+
+
 @api_bp.route("/vulns/config")
 def vulns_config_get():
     if (resp := auth.require_admin()): return resp

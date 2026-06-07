@@ -267,6 +267,130 @@ def deliver_alert(alert: dict[str, Any],
     return out
 
 
+# ---------- CVE-match notifications ----------------------------------------
+# Same webhook configs / SSRF validation / dedup log as alert delivery, with
+# CVE-shaped formatters. A match's CVE severity maps onto the Wazuh-level
+# severity_min each webhook already has, so existing thresholds keep meaning
+# something: critical→13, high→10, medium→7, low→4.
+
+_CVE_SEV_LEVEL = {"critical": 13, "high": 10, "medium": 7, "low": 4, "unknown": 7}
+
+_CVE_SEV_EMOJI = {"critical": ":rotating_light:", "high": ":warning:",
+                  "medium": ":eyes:", "low": ":small_blue_diamond:",
+                  "unknown": ":grey_question:"}
+
+
+def _vuln_url() -> str:
+    base = config.PUBLIC_BASE_URL.rstrip("/") if hasattr(config, "PUBLIC_BASE_URL") \
+        else f"http://{config.LISTEN_HOST}:{config.LISTEN_PORT}"
+    return f"{base}/vulns?tab=matches"
+
+
+def _format_vuln_for_mattermost(m: dict, *_args) -> dict:
+    sev = m.get("severity") or "unknown"
+    flags = (" · 🔴 actively exploited" if m.get("exploited") else "") + \
+            (" · CISA KEV" if m.get("kev") else "")
+    cvss = f" {m['cvss_score']:.1f}" if m.get("cvss_score") else ""
+    lines = [
+        f"{_CVE_SEV_EMOJI.get(sev, ':grey_question:')} **CVE match: "
+        f"{m.get('item_key')} affects `{m.get('asset_name')}`**",
+        "",
+        f"**{sev.upper()}{cvss}**{flags} · priority {m.get('priority', 0):.0f} · "
+        f"asset is {m.get('exposure')}/{m.get('criticality')}",
+        _truncate(m.get("title") or "", 200),
+        f"_match: {m.get('confidence')} — {_truncate(m.get('match_reason') or '', 200)}_",
+    ]
+    if m.get("action"):
+        lines += ["", f"⚡ {_truncate(m['action'], 400)}"]
+    links = [f"[Open tracker]({_vuln_url()})"]
+    if m.get("bookstack_url"):
+        links.append(f"[Deep dive]({m['bookstack_url']})")
+    lines += ["", " · ".join(links)]
+    return {"text": "\n".join(lines), "username": "HomeSOC",
+            "icon_emoji": ":shield:"}
+
+
+def _format_vuln_for_discord(m: dict, *_args) -> dict:
+    sev = m.get("severity") or "unknown"
+    color = 0xF85149 if sev == "critical" else 0xD29922 if sev == "high" else 0x58A6FF
+    desc = [
+        f"**Asset:** `{m.get('asset_name')}` ({m.get('exposure')}/{m.get('criticality')})",
+        f"**Severity:** {sev}" + (f" · CVSS {m['cvss_score']:.1f}" if m.get("cvss_score") else ""),
+        f"**Match:** {m.get('confidence')} — {_truncate(m.get('match_reason') or '', 150)}",
+    ]
+    if m.get("exploited"):
+        desc.append("🔴 **Actively exploited**" + (" · CISA KEV" if m.get("kev") else ""))
+    if m.get("action"):
+        desc.append(f"⚡ {_truncate(m['action'], 300)}")
+    embed: dict[str, Any] = {
+        "title": _truncate(f"{m.get('item_key')} — {m.get('title') or ''}", 250),
+        "description": "\n".join(desc),
+        "color": color,
+        "url": m.get("bookstack_url") or _vuln_url(),
+    }
+    return {"embeds": [embed], "username": "HomeSOC"}
+
+
+def _format_vuln_for_generic(m: dict, *_args) -> dict:
+    return {"type": "cve_match", "match": m, "tracker_url": _vuln_url()}
+
+
+_VULN_FORMATTERS = {
+    "mattermost": _format_vuln_for_mattermost,
+    "slack":      _format_vuln_for_mattermost,   # same simple-text payload
+    "discord":    _format_vuln_for_discord,
+    "generic":    _format_vuln_for_generic,
+}
+
+
+def deliver_vuln_match(m: dict[str, Any]) -> list[dict[str, Any]]:
+    """Deliver one CVE-asset match to every enabled webhook whose severity
+    threshold (mapped) allows it. Dedup key is (webhook, cve:<item>, asset) in
+    the standard notification_log window."""
+    out: list[dict[str, Any]] = []
+    level = _CVE_SEV_LEVEL.get(m.get("severity") or "unknown", 7)
+    rule_key = f"cve:{m.get('item_key')}"
+    asset = m.get("asset_name")
+
+    for w in db.list_webhooks():
+        wid = w["id"]
+        if not w["enabled"]:
+            out.append({"webhook": wid, "skipped": "disabled"})
+            continue
+        if level < w["severity_min"]:
+            out.append({"webhook": wid, "skipped": "below_threshold"})
+            continue
+        if db.notification_recent(wid, rule_key, asset, w["dedup_minutes"]) > 0:
+            db.notification_log_add(wid, None, rule_key, asset, success=False,
+                                    response=None, skipped_reason="dedup")
+            out.append({"webhook": wid, "skipped": "dedup"})
+            continue
+
+        url = _decrypt_url(w["url_encrypted"])
+        if not url:
+            out.append({"webhook": wid, "sent": False, "response": "url decrypt failed"})
+            continue
+        ok_url, why = validate_webhook_url(url)
+        if not ok_url:
+            out.append({"webhook": wid, "sent": False, "response": f"refused: {why}"})
+            continue
+        payload = _VULN_FORMATTERS.get(w["platform"], _format_vuln_for_generic)(m)
+        try:
+            r = requests.post(url, json=payload, timeout=_TIMEOUT,
+                              allow_redirects=False)
+            success = r.status_code in (200, 201, 202, 204)
+            snippet = f"{r.status_code} {r.text[:200]}"
+        except requests.RequestException as e:
+            success, snippet = False, f"network error: {e}"
+        db.notification_log_add(wid, None, rule_key, asset,
+                                success=success, response=snippet)
+        db.update_webhook(
+            wid, last_used_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            last_error=None if success else snippet[:500])
+        out.append({"webhook": wid, "sent": success, "response": snippet})
+    return out
+
+
 def test_webhook(webhook_row) -> tuple[bool, str]:
     """Send a synthetic test notification."""
     sample = {

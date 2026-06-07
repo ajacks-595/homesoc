@@ -1541,6 +1541,19 @@ def cve_match_set_status(match_id: int, status: str, notes: str | None,
             (status, notes, by, now, match_id))
 
 
+def cve_matches_unnotified() -> list[sqlite3.Row]:
+    """New matches never yet announced — the proactive-alert work queue."""
+    with conn() as c:
+        return list(c.execute(
+            "SELECT m.*, i.item_key, i.title, i.severity, i.cvss_score, "
+            "       i.bookstack_url, i.action, i.exploited, i.kev, "
+            "       a.name AS asset_name, a.exposure, a.criticality "
+            "FROM cve_matches m JOIN cve_items i ON i.id = m.cve_item_id "
+            "JOIN assets a ON a.id = m.asset_id "
+            "WHERE m.notified_at IS NULL AND m.status = 'new' "
+            "ORDER BY m.priority DESC").fetchall())
+
+
 def cve_match_mark_notified(match_id: int) -> None:
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     with conn() as c:

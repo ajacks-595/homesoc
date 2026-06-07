@@ -1998,8 +1998,19 @@ const SOC = (() => {
       </div>
       <div class="actions">
         <button class="ghost" data-act="closeModal">Cancel</button>
+        <button class="secondary" data-act="vulnAlertTest" title="Send a synthetic CVE-match notification to all enabled webhooks">Send test alert</button>
         <button data-act="vulnConfigSave">Save</button>
       </div>`);
+  }
+
+  async function vulnAlertTest() {
+    toast("Sending synthetic CVE alert to enabled webhooks…", "info");
+    const r = await api("/api/vulns/alert-test", { method: "POST" });
+    if (!r.success) { toast(r.error, "danger"); return; }
+    const sent = r.data.results.filter(x => x.sent).length;
+    const skipped = r.data.results.filter(x => x.skipped).length;
+    toast(`Test alert: ${sent} delivered, ${skipped} skipped (${r.data.results.length} webhook(s) total).`,
+          sent ? "info" : "warn");
   }
 
   async function vulnConfigSave() {
@@ -2882,7 +2893,7 @@ const SOC = (() => {
     // dns
     dnsSync,
     // cve tracker
-    vulnSync, vulnOpenConfig, vulnConfigSave, vulnImportVigil,
+    vulnSync, vulnOpenConfig, vulnConfigSave, vulnImportVigil, vulnAlertTest,
     assetOpenAdd, assetSubmit,
     // settings
     pipelineRun, webhookOpenAdd, webhookSubmit,

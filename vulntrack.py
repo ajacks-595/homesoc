@@ -400,6 +400,46 @@ def sync_cve_briefings() -> dict[str, Any]:
         stats["pages_processed"] += 1
 
     stats.update(rematch_all())
+    stats.update(notify_new_matches())
     if stats["pages_processed"] or stats["matches_new"]:
         log.info("CVE sync: %s", {k: v for k, v in stats.items() if k != "warnings"})
     return stats
+
+
+# ---------- proactive alerting (Phase 4) --------------------------------------
+# When a sync creates a NEW match above the configured thresholds, announce it
+# through the existing webhook channels. notified_at makes this once-per-match;
+# notifications.deliver_vuln_match adds the per-webhook dedup window on top.
+
+_SEV_ORDER = ("critical", "high", "medium", "low")
+
+
+def _meets_alert_threshold(m: Any, cfg: dict[str, Any]) -> bool:
+    if not cfg.get("alert_enabled"):
+        return False
+    min_sev = cfg.get("alert_min_severity") or "high"
+    sev = m["severity"] if m["severity"] in _SEV_ORDER else "medium"  # unknown → medium
+    if min_sev in _SEV_ORDER and _SEV_ORDER.index(sev) > _SEV_ORDER.index(min_sev):
+        return False
+    exposures = cfg.get("alert_exposures") or []
+    return m["exposure"] in exposures
+
+
+def notify_new_matches() -> dict[str, int]:
+    """Announce unnotified new matches that clear the configured thresholds.
+    Below-threshold matches are marked notified too — they were *considered*;
+    raising the threshold later shouldn't replay history."""
+    import notifications
+    cfg = get_config()
+    sent = skipped = 0
+    for m in db.cve_matches_unnotified():
+        if _meets_alert_threshold(m, cfg):
+            results = notifications.deliver_vuln_match(dict(m))
+            delivered = any(r.get("sent") for r in results)
+            log.info("CVE alert %s × %s: %s", m["item_key"], m["asset_name"],
+                     [r for r in results if "skipped" not in r] or "all skipped")
+            sent += delivered
+        else:
+            skipped += 1
+        db.cve_match_mark_notified(m["id"])
+    return {"alerts_sent": sent, "alerts_below_threshold": skipped}
