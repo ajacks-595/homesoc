@@ -102,6 +102,24 @@ def test_matching_confidence_tiers(tmp_db):
     assert "Proxmox host" in names
 
 
+def test_fuzzy_ignores_generic_infra_tokens(tmp_db):
+    # Live E2E finding: a PAN-OS GlobalProtect item fuzzy-matched "UniFi Cloud
+    # Gateway" purely on the token 'gateway' — and outranked every real match.
+    # Generic infra nouns must not be enough for a fuzzy match on their own.
+    import vulntrack
+    db.asset_insert("UniFi Cloud Gateway", vendor="Ubiquiti", product="UniFi OS",
+                    exposure="internet", criticality="high")
+    pan_os = {"title": "CVE-2026-0257 — PAN-OS GlobalProtect Authentication Bypass",
+              "affects": "Palo Alto PAN-OS GlobalProtect gateway and portal",
+              "affected_detail": "PAN-OS 11.x with GlobalProtect gateway enabled"}
+    assert vulntrack.match_item_to_assets(pan_os, db.assets_list()) == []
+    # ...while the real UniFi item still matches via the product name
+    unifi = {"title": "UniFi OS RCE", "affects": "UniFi OS (Cloud GW)",
+             "affected_detail": "UniFi OS prior to 5.1.12"}
+    got = vulntrack.match_item_to_assets(unifi, db.assets_list())
+    assert got and got[0][1] == "strong"
+
+
 def test_matching_version_note(tmp_db):
     import vulntrack
     db.asset_insert("n8n", product="n8n", version="1.121.0",
@@ -212,6 +230,36 @@ def test_rematch_picks_up_new_assets(auth_client, monkeypatch):
                     exposure="internet", criticality="high")
     res = vulntrack.rematch_all()               # asset added later still matches
     assert res["matches_new"] >= 1
+
+
+def test_rematch_prunes_retracted_but_not_touched(tmp_db):
+    import vulntrack
+    # neutral asset name: only `product` should drive the match, so editing
+    # product genuinely retracts it (a name like "nginx" would keep fuzzy-matching)
+    aid = db.asset_insert("ingress box", product="nginx",
+                          exposure="internet", criticality="high")
+    iid, _ = db.cve_item_upsert("CVE-2026-9999", title="nginx bug",
+                                severity="high", affects="nginx all versions",
+                                cve_ids='["CVE-2026-9999"]')
+    vulntrack.rematch_all()
+    assert len(db.cve_matches_list(statuses=None)) == 1
+    mid = db.cve_matches_list(statuses=None)[0]["id"]
+
+    # asset edited so it no longer matches → untouched 'new' match is pruned
+    db.update_asset_fields(aid, product="apache httpd")
+    res = vulntrack.rematch_all()
+    assert res["matches_pruned"] == 1
+    assert db.cve_matches_list(statuses=None) == []
+
+    # but a match the analyst touched survives retraction
+    db.update_asset_fields(aid, product="nginx")
+    vulntrack.rematch_all()
+    mid = db.cve_matches_list(statuses=None)[0]["id"]
+    db.cve_match_set_status(mid, "investigating", "looking into it", "alex")
+    db.update_asset_fields(aid, product="apache httpd")
+    res = vulntrack.rematch_all()
+    assert res["matches_pruned"] == 0
+    assert db.cve_match_get(mid)["status"] == "investigating"
 
 
 def test_sync_unconfigured_skips(tmp_db):

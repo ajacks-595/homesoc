@@ -194,7 +194,13 @@ def fetch_page(page_id: int) -> dict[str, Any]:
 
 _STOPWORDS = {"server", "service", "services", "app", "apps", "os", "home",
               "cloud", "all", "and", "the", "for", "with", "via", "open",
-              "source", "edition", "version", "versions"}
+              "source", "edition", "version", "versions",
+              # generic infra nouns — single-token overlap on these is noise
+              # (live finding: PAN-OS GlobalProtect fuzzy-matched a UniFi
+              # gateway on the bare token 'gateway' at top-of-queue priority)
+              "gateway", "firewall", "router", "switch", "controller",
+              "manager", "client", "agent", "device", "system", "host",
+              "proxy", "web", "network"}
 
 # Distro/platform aliases: a "Linux kernel" item affects Ubuntu/Proxmox/Debian
 # hosts even when the text never names them. Deliberately small + visible.
@@ -347,9 +353,12 @@ def _item_record(item: dict[str, Any], page: dict[str, Any],
 def rematch_all() -> dict[str, int]:
     """Re-run matching for every stored item × current assets. Cheap (tens of
     items × tens of assets); called after every sync so asset edits take
-    effect without waiting for a new briefing. Never touches workflow status."""
+    effect without waiting for a new briefing. Never touches workflow status;
+    retracted matches (asset edits / matcher improvements) are pruned only
+    while still 'new' and note-less."""
     assets = db.assets_list()
     new = updated = 0
+    valid: set[tuple[int, int]] = set()
     for row in db.cve_items_list():
         item = dict(row)
         item["exploited"], item["kev"] = bool(row["exploited"]), bool(row["kev"])
@@ -357,9 +366,12 @@ def rematch_all() -> dict[str, int]:
             _, created = db.cve_match_upsert(
                 row["id"], asset["id"], confidence, reason,
                 priority_for(item, asset))
+            valid.add((row["id"], asset["id"]))
             new += created
             updated += not created
-    return {"matches_new": new, "matches_refreshed": updated}
+    pruned = db.cve_matches_prune_untouched(valid)
+    return {"matches_new": new, "matches_refreshed": updated,
+            "matches_pruned": pruned}
 
 
 def sync_cve_briefings() -> dict[str, Any]:

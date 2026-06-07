@@ -1541,6 +1541,20 @@ def cve_match_set_status(match_id: int, status: str, notes: str | None,
             (status, notes, by, now, match_id))
 
 
+def cve_matches_prune_untouched(valid_pairs: set[tuple[int, int]]) -> int:
+    """Delete matches the matcher no longer produces (asset edits, matcher
+    improvements) — but ONLY rows still in 'new' with no analyst notes.
+    Anything touched by a human is history and is never pruned."""
+    with conn() as c:
+        rows = c.execute("SELECT id, cve_item_id, asset_id FROM cve_matches "
+                         "WHERE status='new' AND notes IS NULL").fetchall()
+        stale = [(r["id"],) for r in rows
+                 if (r["cve_item_id"], r["asset_id"]) not in valid_pairs]
+        if stale:
+            c.executemany("DELETE FROM cve_matches WHERE id=?", stale)
+        return len(stale)
+
+
 def cve_matches_unnotified() -> list[sqlite3.Row]:
     """New matches never yet announced — the proactive-alert work queue."""
     with conn() as c:

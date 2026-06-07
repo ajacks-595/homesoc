@@ -26,6 +26,16 @@ in case yours looks vaguely similar.
   from `rule.mitre` on stored alerts (no AI, no external data); per-alert
   ATT&CK badges, exact technique/tactic filtering, visibility gaps shown
   per tactic, links to attack.mitre.org
+- **CVE Asset Tracker** — closes the loop from "a CVE exists" to "it's
+  handled on my infrastructure": an asset register (products/versions you
+  run, optional CPE), ingestion of daily CVE-briefing pages from a BookStack
+  book, transparent CVE→asset matching (CPE / product-name / fuzzy, every
+  match shows its reason and confidence), priority = severity × exposure ×
+  criticality (+exploited/KEV), a New→Investigating→Patching→Resolved
+  workflow with per-severity SLAs, and webhook alerts when a new CVE matches
+  your stack above a configurable threshold. Optional asset seeding from a
+  [Vigil](https://github.com/ajacks-595) instance. Honest by design: it's a
+  tracking aid fed by curated intel, not a vulnerability scanner.
 - **AI-powered alert explanations** via the [Claude CLI](https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/overview)
   with WebSearch+WebFetch enabled, cross-correlating IPs/domains against
   other Wazuh alerts and DNS activity. Follow-up chat per alert.

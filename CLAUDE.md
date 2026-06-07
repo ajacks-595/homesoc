@@ -451,6 +451,9 @@ SIEM stack. Built for a senior security analyst running their own home SOC.
 - DNS deep-dive (top domains, per-client breakdown, hourly timeline) from
   AdGuard Home querylog
 - UniFi firewall events extracted from Wazuh alerts
+- CVE Asset Tracker: asset register + CVE→asset matching fed by the daily
+  CVE-briefing pages in BookStack (book 247), remediation workflow with
+  per-severity SLAs, webhook alerts on new above-threshold matches
 - Host inventory bootstrapped from a network `context.md`, with live Wazuh
   agent status
 - Per-user authentication (PBKDF2-SHA256), session cookies, comprehensive
@@ -554,6 +557,7 @@ soc-dashboard/                  (local dir name; published as "homesoc")
 ├── wazuh.py                    # SSH wrappers, agent_control, local_rules.xml mgmt
 ├── sync.py                     # Pollers (alerts/DNS/agents/briefings), dispatch_new_alerts
 ├── osint.py                    # VT / AbuseIPDB / URLScan + 7d cache
+├── vulntrack.py                # CVE asset tracker: BookStack ingest, CVE→asset matching, alert thresholds
 ├── ai.py                       # Claude CLI integration: explain(), chat(), cross-log enrichment
 ├── notifications.py            # Mattermost/Slack/Discord/Generic formatters + dedup
 ├── backup.py                   # SQLite online-backup, config-only filter, SCP push
@@ -600,6 +604,25 @@ service start, safe to repeat.
 - `osint_results` — VT/AbuseIPDB/URLScan cache (7d TTL)
 - `dns_daily_stats` — AdGuard aggregations per day
 - `pipeline_runs` — collect/analyse script execution log
+
+**CVE asset tracker** (see `vulntrack.py`):
+- `assets` — software/product register (vendor/product/version, category,
+  exposure, criticality, optional CPE). Distinct from `hosts` (machines).
+  Rows without product AND cpe are "drafts" — never matched.
+- `cve_items` — items parsed from the daily CVE-briefing pages in BookStack
+  (book "CVE Deep Dives", id 247 — produced by the "CVE News" remote Claude
+  routine, trig_013HUfHiseQTMJ47q94BqPkV). Keyed by primary CVE id (or
+  campaign slug) so items recurring across daily briefings update in place.
+- `cve_matches` — CVE×asset with confidence (cpe/strong/fuzzy) + human-readable
+  match_reason, priority (sev × exposure × criticality, ×1.5 exploited,
+  ×1.2 KEV), workflow status (new/investigating/patching/resolved/
+  accepted_risk/not_applicable), notified_at (once-only webhook alerts).
+  Re-syncs refresh confidence/priority but NEVER touch status; retracted
+  matches are pruned only while still new + note-less.
+- `cve_pages` — BookStack page watermarks (updated_at) for the hourly `cve`
+  poller. Config (BookStack/Vigil creds + alert thresholds) lives in the
+  `vuln_config` settings blob, Fernet-encrypted, admin-edited via the ⚙
+  modal on /vulns.
 
 **AI:**
 - `alert_explanations` — cached per-alert AI explanations
