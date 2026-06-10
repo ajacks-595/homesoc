@@ -938,6 +938,64 @@ listener.
 (Populated by `repo review` runs — additions appear here over time, with
 date + rationale.)
 
+### 2026-06-10 — full code review + hardening pass (deployed to prod)
+
+Bug classes found that had no dedicated test, now covered:
+
+- **CSRF on cookie-authenticated mutations.** No token existed; `SameSite=Lax`
+  alone isn't complete. Fix: per-session synchronizer token (`auth.csrf_get_token`
+  / `csrf_protect`), embedded in a `<meta name="csrf-token">` and sent as
+  `X-CSRF-Token` by the JS `api()` wrapper; `/api/home/*` (bearer) and the
+  login/setup forms exempt; gated off under `TESTING` unless `CSRF_FORCE`.
+  Tests: `tests/test_csrf.py`. → Any new cookie-authed mutating route is covered
+  automatically by the global `before_request`; any NEW raw `fetch()` in JS that
+  isn't the `api()` wrapper MUST add the `X-CSRF-Token` header itself (grep for
+  `fetch(` — only `applyTheme` is intentionally raw, and it sets the header).
+- **Stored DOM XSS via AI-laundered briefing text.** `loadRecActions` injected a
+  recommended-action `description` via `innerHTML` without `escapeHtml()` (its
+  sibling renderers escaped it). Briefings are AI-generated from attacker-
+  influenced Wazuh logs. Fix: escape it. → Any `innerHTML` built from API data
+  must run every interpolated field through `escapeHtml()` (or `safeUrl()` for
+  href/src); the 5 markdown sinks fed by `render_md`/nh3 are the only exception.
+  A browser acceptance test (Playwright) now asserts a payload action does NOT
+  execute — the static CSP test can't catch this (gotcha 15 class).
+- **Unbounded interactive AI cost/DoS.** `manual_explain` + `chat` had no cap
+  (only the auto-explainer honoured `SOC_AI_DAILY_CAP`). Fix: rolling-24h
+  `_interactive_ai_over_cap()` → 429 (`SOC_AI_INTERACTIVE_CAP`, default 60).
+  Test: `tests/test_ai_cap_and_misc.py`. → Any new endpoint that shells out to
+  the Claude CLI must be metered + cap-gated.
+- **Login-throttle map unbounded growth.** `auth._login_fails` pruned per-key
+  only on re-access, so a username/IP spray leaked memory. Fix: stale-bucket
+  sweep once the map exceeds `SOC_LOGIN_FAILS_SWEEP_AT`. → Any in-process,
+  per-identifier accumulator needs a global sweep, not just per-key TTL.
+- **Authz gap: `pipeline/run` (script exec on claude-dev) wasn't admin-gated.**
+  Fix: `require_admin()`. Plus the Settings page now hides admin-only cards from
+  analysts (`is_admin` template flag) so they don't see controls that 403.
+  Tests: `tests/test_admin_required.py`. → New admin-only UI goes behind
+  `{% if is_admin %}` AND `require_admin()` (backend is the boundary).
+- **Unindexed `raw_json LIKE` ref scans.** `osint_references` / `alerts_by_ip`
+  scanned the whole 387k-row / 849MB alerts table. Fix: bound by an
+  `OSINT_REF_DAYS` window so idx_alerts_ts limits the scan. → A leading-`%` LIKE
+  with no other indexable predicate is a full scan; always pair it with a
+  time/status bound on a large table.
+
+New test patterns adopted this run:
+- **Browser acceptance (Playwright) for CSP/CSRF/escaping.** Static per-page CSP
+  tests pass even when prod is visually broken (gotcha 15). A headless Chromium
+  run that logs in, asserts no console errors, that init scripts execute, that a
+  payload does NOT fire, and that a no-token POST is rejected — is the only thing
+  that catches the CSP-blocked-init and stored-XSS classes. Run it (against a
+  local `SOC_PORT=8099` server) after any CSP/template/JS-escaping change.
+
+Deferred (flagged, NOT auto-applied — data migration on the largest prod table):
+- **FTS5 full-text alert search.** The alert text search (`q=`) and `raw_json`
+  lookups do full scans; on prod's 387k-row / 849MB `alerts` table this is the
+  headline latency. The real fix is an FTS5 virtual table over
+  `full_log`/`rule_description` with triggers + a **bounded, resumable,
+  high-water-mark backfill** (the `_populate_alert_mitre` pattern — per-batch
+  `BEGIN IMMEDIATE`, never a whole-table write; see gotcha 14). Left for a
+  deliberate operator-run migration rather than an autonomous prod change.
+
 ### 2026-06-04 — code review of the Codex-authored tree (M1–M4 + L1–L12)
 
 Bug classes found that had no dedicated test, now covered:
