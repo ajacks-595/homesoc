@@ -82,7 +82,7 @@ Everything except the AI features works without internet access.
 ## Quick start (locally)
 
 ```bash
-git clone https://github.com/ajacks595/homesoc.git
+git clone https://github.com/ajacks-595/homesoc.git
 cd homesoc
 python3 -m venv venv
 ./venv/bin/pip install -r requirements.txt
@@ -131,7 +131,7 @@ Edit `deploy.sh` (top of file) for your target host, then:
 ```
 
 It rsyncs source to `wazuh@<host>:/opt/dashboard/`, sets up a virtualenv,
-installs the systemd service + 3 sync timers, restarts, and tails logs.
+installs the systemd service + all sync timers, restarts, and tails logs.
 
 Two sudoers files in `sudoers.d/` need to be installed once on the target
 hosts — see `CLAUDE.md` for the exact rules required.
@@ -171,7 +171,7 @@ deploy.sh          # rsync + venv + systemd
 sudoers.d/         # Two sudoers files for target hosts
 systemd/           # 3 timer + 1 templated service unit
 soc-dashboard.service
-templates/         # 11 Jinja templates
+templates/         # 13 Jinja templates
 static/css/        # themes.css + main.css (4 themes, ~600 LOC)
 static/js/main.js  # All frontend interactivity (~2k LOC namespace)
 static/js/chart.min.js   # Chart.js v4 (vendored)
@@ -242,13 +242,16 @@ restart path as the web UI. See `SECURITY.md`.
 
 **LAN-only by design.** Served by the `waitress` production WSGI server
 (threaded; `SOC_THREADS` to tune, `SOC_DEV_SERVER=1` for the Werkzeug
-reloader during local dev). No CSRF tokens (mitigated by `SameSite=Lax`
-session cookies), no rate-limiting on login. For wider exposure:
+reloader during local dev). State-changing requests carry a per-session
+**CSRF token** (`X-CSRF-Token` header, on top of `SameSite=Lax` cookies),
+and login is **rate-limited** (per-IP + per-user sliding window). For wider
+exposure:
 
 1. Put it behind a reverse proxy (Caddy + Let's Encrypt is well-documented)
-2. Add rate limiting at the proxy
-3. Set `SOC_COOKIE_SECURE=1` so cookies require HTTPS
-4. Consider adding CSRF middleware (Flask-WTF)
+2. Set `SOC_COOKIE_SECURE=1` so cookies require HTTPS (sends HSTS too)
+3. Set `SOC_TRUST_PROXY=<hops>` so the login throttle + audit log see the
+   real client IP, and `SOC_WEBHOOK_ALLOW_PRIVATE=0` to block private-range
+   webhook targets
 
 See `SECURITY.md` for more.
 

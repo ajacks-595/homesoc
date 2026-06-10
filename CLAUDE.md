@@ -611,8 +611,8 @@ service start, safe to repeat.
   Rows without product AND cpe are "drafts" — never matched.
 - `cve_items` — items parsed from the daily CVE-briefing pages in BookStack
   (book "CVE Deep Dives", id 247 — produced by the "CVE News" remote Claude
-  routine, trig_013HUfHiseQTMJ47q94BqPkV). Keyed by primary CVE id (or
-  campaign slug) so items recurring across daily briefings update in place.
+  routine). Keyed by primary CVE id (or campaign slug) so items recurring
+  across daily briefings update in place.
 - `cve_matches` — CVE×asset with confidence (cpe/strong/fuzzy) + human-readable
   match_reason, priority (sev × exposure × criticality, ×1.5 exploited,
   ×1.2 KEV), workflow status (new/investigating/patching/resolved/
