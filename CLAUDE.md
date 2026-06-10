@@ -986,15 +986,40 @@ New test patterns adopted this run:
   payload does NOT fire, and that a no-token POST is rejected — is the only thing
   that catches the CSP-blocked-init and stored-XSS classes. Run it (against a
   local `SOC_PORT=8099` server) after any CSP/template/JS-escaping change.
+- **At-scale validation on a copy of the live DB.** "Fast locally proves
+  nothing" (gotcha 14): dev's DB is tiny. For any change to a hot query or a
+  migration on the `alerts` table, snapshot prod (`sqlite3 .backup` / online
+  backup), rsync it to dev, and run the change against the real row volume —
+  assert correctness PARITY (new path's result set == old path's), measure time,
+  and `PRAGMA integrity_check`. This is how the FTS migration below was proven.
 
-Deferred (flagged, NOT auto-applied — data migration on the largest prod table):
-- **FTS5 full-text alert search.** The alert text search (`q=`) and `raw_json`
-  lookups do full scans; on prod's 387k-row / 849MB `alerts` table this is the
-  headline latency. The real fix is an FTS5 virtual table over
-  `full_log`/`rule_description` with triggers + a **bounded, resumable,
-  high-water-mark backfill** (the `_populate_alert_mitre` pattern — per-batch
-  `BEGIN IMMEDIATE`, never a whole-table write; see gotcha 14). Left for a
-  deliberate operator-run migration rather than an autonomous prod change.
+Implemented this run — **FTS5 trigram alert search** (was the deferred headline
+perf item; now built + deployed):
+- The alert text search (`q=`) did a leading-`%` LIKE across full_log/
+  rule_description/agent_name — a full scan of the 389k-row / 850MB `alerts`
+  table (~310ms/query). Replaced with a **contentless FTS5** index using the
+  **trigram** tokenizer (true substring matching → identical results to LIKE,
+  no silently-dropped alerts; 25–388× faster; +394MB index).
+- Maintenance: an `alerts_fts_ai` AFTER INSERT trigger only — the indexed
+  columns are insert-only, and a stale rowid (if pruning is ever added) is
+  harmless because search joins the FTS rowids against the live `alerts` table.
+  Contentless FTS5 rejects plain `DELETE` (use the `'delete-all'` command), which
+  is itself the failsafe that keeps a future dev from adding an unsafe delete.
+- Backfill (`database.fts_backfill_step`): bounded, durable, RESUMABLE batches
+  via a high-water mark in `fts_state` — `BEGIN IMMEDIATE` per batch, never a
+  whole-table write (gotcha 14). The TARGET (`MAX(id)`) is captured once in
+  `_init_fts` BEFORE any insert can fire the trigger, so trigger-indexed new
+  rows (`> target`) and backfilled old rows (`<= target`) never overlap. A
+  background worker (`sync._start_fts_backfill_worker`) runs it gently at
+  startup (~84s on prod); `run_retention` advances it for `SOC_POLLERS=systemd`
+  deploys; `app.py --run fts_backfill` does it on demand.
+- Search uses LIKE until `db.fts_is_ready()` (backfill complete), for searches
+  under the trigram 3-char floor, and on FTS5-less SQLite builds — so results
+  are always complete. Match text is wrapped as an FTS5 string literal (quotes
+  doubled) → no operator injection. Tests: `tests/test_fts_search.py`.
+  → When adding a searchable alert column, add it to the `alerts_fts` column
+  list AND the `alerts_fts_ai` trigger, then re-backfill (clear with
+  `INSERT INTO alerts_fts(alerts_fts) VALUES('delete-all')`, reset `fts_state`).
 
 ### 2026-06-04 — code review of the Codex-authored tree (M1–M4 + L1–L12)
 
