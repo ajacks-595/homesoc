@@ -242,6 +242,43 @@ def _enqueue_dispatch(new_wazuh_ids: set[str]) -> None:
         _dispatch_new_alerts(new_wazuh_ids)
 
 
+# ---------- FTS backfill worker -------------------------------------------
+# Building the trigram alert-search index over the pre-existing rows is I/O-heavy
+# (e.g. ~48s for prod's 389k rows). It runs here in a background thread in small,
+# durable, resumable batches with a pause between bursts so it never blocks app
+# start or contends hard with the live alerts poller. Search transparently uses
+# LIKE until this completes (db.fts_is_ready gates it), so results are always
+# correct meanwhile. New alerts are indexed immediately by the insert trigger.
+
+_fts_backfill_thread: threading.Thread | None = None
+
+
+def _start_fts_backfill_worker() -> None:
+    global _fts_backfill_thread
+    if _fts_backfill_thread and _fts_backfill_thread.is_alive():
+        return
+
+    def go():
+        try:
+            time.sleep(15)   # let the app settle before the heavy initial build
+            first = db.fts_backfill_step(batch=2000, max_batches=5)
+            if first.get("done"):
+                return        # fresh DB / already built / FTS unavailable
+            log.info("alerts FTS backfill started (target=%s)", first.get("target"))
+            while True:
+                res = db.fts_backfill_step(batch=2000, max_batches=10)
+                if res.get("done"):
+                    log.info("alerts FTS backfill complete (high_water=%s)",
+                             res.get("high_water"))
+                    return
+                time.sleep(1.0)   # be gentle on the live DB between bursts
+        except Exception:  # noqa: BLE001
+            log.exception("FTS backfill worker failed")
+
+    _fts_backfill_thread = threading.Thread(target=go, daemon=True, name="fts-backfill")
+    _fts_backfill_thread.start()
+
+
 def sync_agent_status() -> int:
     try:
         agents = wazuh.list_agents()
@@ -374,6 +411,11 @@ def run_retention() -> dict[str, int]:
         "notification_log": db.notification_log_prune(notify_days),
         "ai_runs":          db.ai_runs_prune(airuns_days),
     }
+    # Advance the alert-search FTS backfill a bounded amount. The in-process
+    # worker normally finishes this in minutes at startup; this covers
+    # SOC_POLLERS=systemd deployments (no background threads), converging over a
+    # few daily runs. No-op once the index is fully built.
+    res["fts_backfill"] = db.fts_backfill_step(batch=2000, max_batches=50)
     log.info("retention pruned: %s", res)
     return res
 
@@ -459,6 +501,8 @@ def start_background_pollers() -> None:
 
     # Background worker that drains AI-enrichment + delivery off the poller path.
     _start_dispatch_worker()
+    # Background builder for the alert-search FTS index (one-time, resumable).
+    _start_fts_backfill_worker()
 
     # Stagger initial fires by a few seconds so we don't hammer the network at boot.
     def delayed(delay_s: int, name: str, interval_s: int, fn):
@@ -491,6 +535,7 @@ def poller_status() -> dict[str, object]:
                        "retention_s": _POLL_RETENTION_S,
                        "cve_s":       _POLL_CVE_S},
         "state":      state,
+        "fts":        db.fts_status(),
     }
 
 

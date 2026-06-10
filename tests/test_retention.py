@@ -34,5 +34,7 @@ def test_ai_runs_prune(tmp_db):
 
 def test_run_retention_returns_counts(tmp_db):
     res = sync.run_retention()
-    assert set(res) == {"osint_expired", "notification_log", "ai_runs"}
-    assert all(isinstance(v, int) for v in res.values())
+    assert set(res) == {"osint_expired", "notification_log", "ai_runs", "fts_backfill"}
+    # The prune counters are ints; fts_backfill is a progress dict.
+    assert all(isinstance(res[k], int) for k in ("osint_expired", "notification_log", "ai_runs"))
+    assert isinstance(res["fts_backfill"], dict) and "done" in res["fts_backfill"]

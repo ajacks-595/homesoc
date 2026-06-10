@@ -2186,6 +2186,10 @@ def _cli_run_oneshot(kind: str) -> int:
         result = sync.run_retention()
     elif kind == "cve":
         result = sync.sync_cve_briefings()
+    elif kind == "fts_backfill":
+        # Build the alert-search FTS index to completion (resumable, bounded
+        # batches). For SOC_POLLERS=systemd deployments or a manual run.
+        result = db.fts_backfill_step()
     elif kind == "bootstrap":
         result = sync.first_run_bootstrap()
     else:

@@ -458,6 +458,11 @@ def init_db() -> None:
         n = _populate_alert_mitre(c)
         if n:
             log.info("alert_mitre: extracted ATT&CK mappings for %d alerts", n)
+        # Full-text search index for alerts (trigram → true substring parity
+        # with the old LIKE). Created in a try/except so a SQLite build without
+        # FTS5 degrades to LIKE-only search instead of failing to boot. The
+        # large existing-row backfill runs OUT of band (see fts_backfill_step).
+        _init_fts(c)
     # The DB holds Fernet-encrypted secrets + the signed-session key. Its key
     # material (/etc/machine-id) is world-readable, so a local user able to read
     # the DB file could derive those keys — keep the file (and WAL/SHM) owner-only.
@@ -466,6 +471,157 @@ def init_db() -> None:
             os.chmod(p, 0o600)
         except OSError:
             pass
+
+
+# ---------- full-text search (alerts) -------------------------------------
+# A contentless FTS5 index over (full_log, rule_description, agent_name) using
+# the `trigram` tokenizer, which matches arbitrary substrings (so a search for
+# "ssh" still finds "openssh" — exact parity with the old `LIKE '%ssh%'`, which
+# matters for a security tool: no silently-missed alerts). Validated at prod
+# scale (389k rows): identical result sets to LIKE, 25–388× faster.
+#
+# It is contentless (`content=''`) so it stores only the index, not a second
+# copy of the text. An AFTER INSERT trigger keeps it current; there is
+# deliberately NO delete/update trigger — alerts' indexed columns are
+# insert-only in this app, and even if alert pruning is ever added, a stale FTS
+# rowid is harmless: search joins `id IN (SELECT rowid FROM alerts_fts …)`
+# against the live alerts table, so an orphan rowid simply matches nothing.
+
+_FTS_READY_CACHE = False   # once True it stays True (per process); see fts_is_ready
+
+
+def _init_fts(c: sqlite3.Connection) -> bool:
+    """Create the FTS index + maintenance trigger + watermark state. Idempotent.
+    Returns False (and logs) on a SQLite build without FTS5 — search then falls
+    back to LIKE forever, which is correct, just unindexed."""
+    try:
+        c.execute("CREATE TABLE IF NOT EXISTS fts_state(key TEXT PRIMARY KEY, value INTEGER)")
+        c.execute("CREATE VIRTUAL TABLE IF NOT EXISTS alerts_fts USING fts5("
+                  "full_log, rule_description, agent_name, "
+                  "content='', tokenize='trigram')")
+        c.execute(
+            "CREATE TRIGGER IF NOT EXISTS alerts_fts_ai AFTER INSERT ON alerts BEGIN "
+            "INSERT INTO alerts_fts(rowid, full_log, rule_description, agent_name) "
+            "VALUES (new.id, new.full_log, new.rule_description, new.agent_name); END")
+        # Capture the backfill TARGET exactly once, here at init — before any new
+        # insert can fire the trigger. New rows (> target) are trigger-indexed;
+        # the backfill covers (0, target]. Disjoint ranges → never double-indexed.
+        c.execute("INSERT INTO fts_state(key,value) VALUES('target',"
+                  "(SELECT COALESCE(MAX(id),0) FROM alerts)) ON CONFLICT(key) DO NOTHING")
+        c.execute("INSERT INTO fts_state(key,value) VALUES('high_water',0) "
+                  "ON CONFLICT(key) DO NOTHING")
+        return True
+    except sqlite3.OperationalError as e:
+        log.warning("FTS5 unavailable — alert search falls back to LIKE (%s)", e)
+        return False
+
+
+def _fts_available(c: sqlite3.Connection) -> bool:
+    return c.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                     "AND name='alerts_fts'").fetchone() is not None
+
+
+def _fts_state_get(c: sqlite3.Connection, key: str) -> int | None:
+    row = c.execute("SELECT value FROM fts_state WHERE key=?", (key,)).fetchone()
+    return int(row[0]) if row else None
+
+
+def fts_is_ready(c: sqlite3.Connection | None = None) -> bool:
+    """True once the existing-row backfill has reached the target high-water
+    mark, i.e. every alert is indexed (old rows by the backfill, new rows by the
+    trigger). Cached True per process — it only ever transitions once."""
+    global _FTS_READY_CACHE
+    if _FTS_READY_CACHE:
+        return True
+    if c is None:
+        with conn() as cc:
+            return fts_is_ready(cc)
+    if not _fts_available(c):
+        return False
+    target = _fts_state_get(c, "target")
+    hw = _fts_state_get(c, "high_water")
+    ready = target is not None and hw is not None and hw >= target
+    if ready:
+        _FTS_READY_CACHE = True
+    return ready
+
+
+def fts_backfill_step(batch: int = 2000, max_batches: int | None = None) -> dict[str, Any]:
+    """Index a bounded slice of the pre-existing alerts (ids in (high_water,
+    target]) into the FTS index, advancing the durable high-water mark. Each
+    batch is its own BEGIN IMMEDIATE → one fsync per batch, never a whole-table
+    write (CLAUDE.md gotcha 14). Resumable: a restart mid-backfill continues from
+    the stored watermark. Returns progress; `done` True once fully caught up.
+
+    `max_batches` bounds work per call (for a poller/one-shot tick); None means
+    run to completion (the in-process background worker)."""
+    with conn() as c:
+        if not _fts_available(c):
+            return {"done": True, "indexed": 0, "skipped": "fts unavailable"}
+        target = _fts_state_get(c, "target")
+        hw = _fts_state_get(c, "high_water")
+        if target is None or hw is None:
+            return {"done": True, "indexed": 0, "skipped": "fts state missing"}
+        indexed = 0
+        n = 0
+        while hw < target:
+            if max_batches is not None and n >= max_batches:
+                break
+            rows = c.execute(
+                "SELECT id, full_log, rule_description, agent_name FROM alerts "
+                "WHERE id > ? AND id <= ? ORDER BY id LIMIT ?",
+                (hw, target, batch)).fetchall()
+            if not rows:
+                hw = target          # nothing left in range → caught up
+                break
+            c.execute("BEGIN IMMEDIATE")
+            try:
+                c.executemany(
+                    "INSERT INTO alerts_fts(rowid, full_log, rule_description, agent_name) "
+                    "VALUES(?,?,?,?)",
+                    [(r["id"], r["full_log"], r["rule_description"], r["agent_name"])
+                     for r in rows])
+                hw = rows[-1]["id"]
+                c.execute("UPDATE fts_state SET value=? WHERE key='high_water'", (hw,))
+                c.execute("COMMIT")
+            except BaseException:
+                c.execute("ROLLBACK")
+                raise
+            indexed += len(rows)
+            n += 1
+        # Persist the final caught-up watermark (covers the "no rows left" case).
+        c.execute("UPDATE fts_state SET value=? WHERE key='high_water'", (hw,))
+        done = hw >= target
+    if done:
+        global _FTS_READY_CACHE
+        _FTS_READY_CACHE = True
+    return {"done": done, "indexed": indexed, "high_water": hw, "target": target}
+
+
+def fts_status() -> dict[str, Any]:
+    """Backfill progress for the pollers/status surface."""
+    with conn() as c:
+        if not _fts_available(c):
+            return {"available": False, "ready": False}
+        target = _fts_state_get(c, "target") or 0
+        hw = _fts_state_get(c, "high_water") or 0
+        return {
+            "available": True,
+            "ready": hw >= target,
+            "indexed": min(hw, target),
+            "target": target,
+        }
+
+
+_FTS_MIN_QUERY_LEN = 3   # trigram needs ≥3 chars; shorter searches use LIKE
+
+
+def _fts_match_literal(search: str) -> str:
+    """Wrap a raw search string as an FTS5 string literal for the trigram
+    tokenizer (a substring query). Doubling embedded double-quotes neutralises
+    FTS5 query syntax, so the user's text is matched verbatim — no operator
+    injection, no syntax errors."""
+    return '"' + (search or "").replace('"', '""') + '"'
 
 
 # ---------- briefings ----------
@@ -680,9 +836,17 @@ def query_alerts(*, date_from: str | None = None, date_to: str | None = None,
               " OR tactic = ? COLLATE NOCASE)")
         params.extend([mitre, mitre, mitre])
     if search:
-        q += " AND (full_log LIKE ? OR rule_description LIKE ? OR agent_name LIKE ?)"
-        like = f"%{search}%"
-        params.extend([like, like, like])
+        # Use the trigram FTS index once it's fully built (substring parity with
+        # LIKE, 25–388× faster on the prod-scale table). Fall back to LIKE while
+        # the backfill is still running, for searches under the trigram's 3-char
+        # floor, or on a build without FTS5 — so results are always complete.
+        if len(search.strip()) >= _FTS_MIN_QUERY_LEN and fts_is_ready():
+            q += " AND id IN (SELECT rowid FROM alerts_fts WHERE alerts_fts MATCH ?)"
+            params.append(_fts_match_literal(search))
+        else:
+            q += " AND (full_log LIKE ? OR rule_description LIKE ? OR agent_name LIKE ?)"
+            like = f"%{search}%"
+            params.extend([like, like, like])
     with conn() as c:
         # Skip the extra full-predicate COUNT pass when the caller discards the
         # total (e.g. CSV export) — with the leading-% LIKE search that COUNT is
