@@ -69,3 +69,25 @@ def test_non_admin_keeps_analyst_surface(app):
     assert user.get("/api/alerts").status_code == 200
     assert user.get("/api/dashboard/metrics").status_code == 200
     assert user.get("/api/fp/list").status_code == 200
+
+
+def test_pipeline_run_admin_only(app):
+    admin = _admin_client(app)
+    user = _make_user_and_login(app, admin)
+    # collect/analyse/weekly execute shell scripts on claude-dev → admin-only
+    assert user.post("/api/pipeline/run", json={"kind": "collect"}).status_code == 403
+    assert admin.post("/api/pipeline/run", json={"kind": "nonsense"}).status_code == 400
+
+
+def test_settings_page_hides_admin_cards_for_non_admin(app):
+    admin = _admin_client(app)
+    user = _make_user_and_login(app, admin)
+    admin_html = admin.get("/settings").get_data(as_text=True)
+    user_html = user.get("/settings").get_data(as_text=True)
+    # Admin sees the admin cards; the analyst does not.
+    for marker in ('id="host-config-card"', 'id="users-table"', 'id="audit-table"',
+                   'data-act="pipelineRun"'):
+        assert marker in admin_html, marker
+        assert marker not in user_html, f"non-admin should not see {marker}"
+    # Shared cards (2FA, theme) remain for both.
+    assert 'id="twofa-status"' in user_html

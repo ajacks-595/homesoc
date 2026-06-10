@@ -335,6 +335,25 @@ CREATE TABLE IF NOT EXISTS pipeline_runs (
     briefing_size INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_pipeline_kind_ts ON pipeline_runs(kind, started_at DESC);
+
+-- Per-(rule, agent) "expected behaviour" notes. An analyst quality-of-life
+-- feature: a persistent note attached to a Wazuh rule id, optionally scoped to
+-- one agent, surfaced inline next to matching alerts ("this rule is expected on
+-- this host because…"). agent_name='' means rule-wide (all agents); the empty
+-- string rather than NULL keeps the UNIQUE constraint dedupe-correct (SQLite
+-- treats every NULL as distinct). Distinct from false_positives, which suppress
+-- the rule in Wazuh — a note changes nothing operationally, it's context.
+CREATE TABLE IF NOT EXISTS rule_agent_notes (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    rule_id     TEXT    NOT NULL,
+    agent_name  TEXT    NOT NULL DEFAULT '',   -- '' = applies to all agents
+    note        TEXT    NOT NULL,
+    created_by  TEXT,
+    created_at  TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at  TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(rule_id, agent_name)
+);
+CREATE INDEX IF NOT EXISTS idx_rule_notes_rule ON rule_agent_notes(rule_id);
 """
 
 
@@ -1169,11 +1188,20 @@ def get_alert(alert_id: int) -> sqlite3.Row | None:
         return c.execute("SELECT * FROM alerts WHERE id=?", (alert_id,)).fetchone()
 
 
+def _ref_cutoff() -> str:
+    from config import OSINT_REF_DAYS
+    return (datetime.now(timezone.utc)
+            - timedelta(days=OSINT_REF_DAYS)).strftime("%Y-%m-%dT%H:%M:%S")
+
+
 def alerts_by_ip(ip: str) -> list[sqlite3.Row]:
+    # Bounded by timestamp so the unindexable raw_json LIKE walks only the recent
+    # window via idx_alerts_ts instead of the whole table (see OSINT_REF_DAYS).
     with conn() as c:
         return list(c.execute(
-            "SELECT * FROM alerts WHERE raw_json LIKE ? ORDER BY timestamp DESC LIMIT 50",
-            (f"%{ip}%",)).fetchall())
+            "SELECT * FROM alerts WHERE timestamp >= ? AND raw_json LIKE ? "
+            "ORDER BY timestamp DESC LIMIT 50",
+            (_ref_cutoff(), f"%{ip}%")).fetchall())
 
 
 # ---------- false positives ----------
@@ -1199,6 +1227,56 @@ def insert_fp(rule_id: str, agent_name: str | None, description: str,
 def delete_fp(fp_id: int) -> None:
     with conn() as c:
         c.execute("DELETE FROM false_positives WHERE id=?", (fp_id,))
+
+
+# ---------- rule+agent expected-behaviour notes ----------
+
+def rule_notes_list() -> list[sqlite3.Row]:
+    with conn() as c:
+        return list(c.execute(
+            "SELECT * FROM rule_agent_notes ORDER BY rule_id, agent_name").fetchall())
+
+
+def rule_note_get(note_id: int) -> sqlite3.Row | None:
+    with conn() as c:
+        return c.execute(
+            "SELECT * FROM rule_agent_notes WHERE id=?", (note_id,)).fetchone()
+
+
+def rule_note_for(rule_id: str, agent_name: str | None) -> sqlite3.Row | None:
+    """Best note for an alert: an agent-specific note wins over a rule-wide
+    ('') one. Returns None if neither exists."""
+    agent = agent_name or ""
+    with conn() as c:
+        return c.execute(
+            "SELECT * FROM rule_agent_notes WHERE rule_id=? AND agent_name IN (?, '') "
+            "ORDER BY CASE WHEN agent_name=? THEN 0 ELSE 1 END LIMIT 1",
+            (rule_id, agent, agent)).fetchone()
+
+
+def rule_note_upsert(rule_id: str, agent_name: str | None, note: str,
+                     created_by: str | None) -> tuple[int, bool]:
+    """Insert or replace the note for (rule_id, agent_name). Returns
+    (id, created)."""
+    agent = agent_name or ""
+    with conn() as c:
+        row = c.execute(
+            "SELECT id FROM rule_agent_notes WHERE rule_id=? AND agent_name=?",
+            (rule_id, agent)).fetchone()
+        if row:
+            c.execute(
+                "UPDATE rule_agent_notes SET note=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                (note, row["id"]))
+            return int(row["id"]), False
+        cur = c.execute(
+            "INSERT INTO rule_agent_notes(rule_id, agent_name, note, created_by) "
+            "VALUES(?,?,?,?)", (rule_id, agent, note, created_by))
+        return int(cur.lastrowid or 0), True
+
+
+def rule_note_delete(note_id: int) -> None:
+    with conn() as c:
+        c.execute("DELETE FROM rule_agent_notes WHERE id=?", (note_id,))
 
 
 def refresh_fp_alert_counts() -> None:
@@ -1261,6 +1339,30 @@ def update_action_status(action_id: int, status: str, notes: str | None = None) 
             c.execute(
                 "UPDATE recommended_actions SET status=?, resolution_notes=COALESCE(?, resolution_notes) WHERE id=?",
                 (status, notes, action_id))
+
+
+def update_action_notes(action_id: int, notes: str | None) -> None:
+    """Attach/replace an action's notes without changing its status."""
+    with conn() as c:
+        c.execute(
+            "UPDATE recommended_actions SET resolution_notes=? WHERE id=?",
+            (notes, action_id))
+
+
+def count_actions(statuses: Iterable[str], priority: str | None = None) -> int:
+    """Count actions in any of `statuses` (optionally for one priority). Avoids
+    materialising rows just to len() them (the overview's open-P1 metric)."""
+    statuses = list(statuses)
+    if not statuses:
+        return 0
+    q = ("SELECT COUNT(*) FROM recommended_actions WHERE status IN ("
+         + ",".join("?" * len(statuses)) + ")")
+    params: list[Any] = list(statuses)
+    if priority:
+        q += " AND priority=?"
+        params.append(priority)
+    with conn() as c:
+        return int(c.execute(q, params).fetchone()[0])
 
 
 def action_stats() -> dict[str, Any]:
@@ -1340,11 +1442,14 @@ def ai_runs_prune(days: int = 7) -> int:
 
 
 def osint_references(ioc_value: str) -> dict[str, list[Any]]:
-    """Find alerts/briefings that reference this IOC."""
+    """Find alerts/briefings that reference this IOC. The alert lookup is bounded
+    to the recent window (OSINT_REF_DAYS) so the unindexable raw_json LIKE uses
+    idx_alerts_ts instead of scanning the whole alerts table."""
     with conn() as c:
         alerts = c.execute(
-            "SELECT id,timestamp,agent_name,rule_id,rule_description FROM alerts WHERE raw_json LIKE ? ORDER BY timestamp DESC LIMIT 20",
-            (f"%{ioc_value}%",),
+            "SELECT id,timestamp,agent_name,rule_id,rule_description FROM alerts "
+            "WHERE timestamp >= ? AND raw_json LIKE ? ORDER BY timestamp DESC LIMIT 20",
+            (_ref_cutoff(), f"%{ioc_value}%"),
         ).fetchall()
         briefings = c.execute(
             "SELECT id,date,type FROM briefings WHERE content LIKE ? ORDER BY date DESC LIMIT 20",

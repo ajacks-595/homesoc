@@ -89,6 +89,17 @@ def int_field(data: dict, name: str, default: int) -> int:
         raise BadParam(f"{name} must be an integer")
 
 
+def _interactive_ai_over_cap() -> "tuple[bool, int, int]":
+    """Rolling-24h budget for analyst-initiated AI calls (manual explain + chat).
+    The auto-explainer already honours SOC_AI_DAILY_CAP; without a matching cap
+    here any logged-in user could trigger unbounded ~60s Claude CLI calls (cost +
+    SSH-worker exhaustion DoS). Default 60/24h, tunable via SOC_AI_INTERACTIVE_CAP.
+    Returns (over_cap, used, cap)."""
+    cap = int(os.environ.get("SOC_AI_INTERACTIVE_CAP", "60"))
+    used = db.ai_runs_count("manual_explain", 24) + db.ai_runs_count("chat", 24)
+    return used >= cap, used, cap
+
+
 def _csv_safe(value) -> str:
     """Neutralise CSV/formula injection (CWE-1236). Spreadsheet apps execute a
     cell whose text starts with = + - @ (or a leading tab/CR), and alert fields
@@ -236,8 +247,7 @@ def metrics():
         round(100.0 * dns["blocked_queries"] / dns["total_queries"], 1)
         if dns["total_queries"] else 0.0
     )
-    open_p1 = len(db.list_actions(status="open", priority="P1"))
-    open_p1 += len(db.list_actions(status="in_progress", priority="P1"))
+    open_p1 = db.count_actions(("open", "in_progress"), priority="P1")
     active_agents = sum(1 for h in db.list_hosts() if h["agent_status"] == "active")
 
     # Level-10+ open alerts in last 24h — surfaced as a banner on the dashboard.
@@ -358,6 +368,10 @@ def alerts_explain(aid: int):
         return ok({"content": None, "html": None, "from_cache": False,
                    "not_generated": True})
 
+    over, used, cap = _interactive_ai_over_cap()
+    if over:
+        return err(f"AI request cap reached ({used}/{cap} in 24h) — try again later", 429)
+
     try:
         raw = json.loads(row["raw_json"]) if row["raw_json"] else {}
     except json.JSONDecodeError:
@@ -422,6 +436,10 @@ def alerts_chat_send(aid: int):
     explanation_row = db.explanation_get(aid)
     if not explanation_row:
         return err("generate an AI explanation first")
+
+    over, used, cap = _interactive_ai_over_cap()
+    if over:
+        return err(f"AI request cap reached ({used}/{cap} in 24h) — try again later", 429)
 
     try:
         raw = json.loads(row["raw_json"]) if row["raw_json"] else {}
@@ -492,7 +510,54 @@ def alert_detail(aid: int):
     row = db.get_alert(aid)
     if not row:
         return err("not found", 404)
-    return ok(row_to_dict(row))
+    d = row_to_dict(row)
+    # Surface any analyst "expected behaviour" note for this (rule, agent).
+    note = db.rule_note_for(row["rule_id"], row["agent_name"])
+    d["rule_note"] = dict(note) if note else None
+    return ok(d)
+
+
+# ---------- rule+agent expected-behaviour notes ---------------------------
+
+@api_bp.route("/rule-notes")
+def rule_notes_list_api():
+    return ok([dict(r) for r in db.rule_notes_list()])
+
+
+@api_bp.route("/rule-notes/lookup")
+def rule_note_lookup():
+    rid = (request.args.get("rule_id") or "").strip()
+    if not rid:
+        return err("rule_id required")
+    note = db.rule_note_for(rid, request.args.get("agent") or None)
+    return ok(dict(note) if note else None)
+
+
+@api_bp.route("/rule-notes", methods=["POST"])
+def rule_note_save():
+    p = request.get_json(silent=True) or {}
+    rid = (p.get("rule_id") or "").strip()
+    note = (p.get("note") or "").strip()
+    agent = (p.get("agent_name") or "").strip()
+    if not rid or not note:
+        return err("rule_id and note required")
+    user = auth.current_user()
+    nid, created = db.rule_note_upsert(rid, agent, note,
+                                       user["username"] if user else None)
+    auth.audit("rule_note.save", "rule_note", nid,
+               {"rule_id": rid, "agent_name": agent, "created": created})
+    return ok({"id": nid, "created": created})
+
+
+@api_bp.route("/rule-notes/<int:nid>", methods=["DELETE"])
+def rule_note_remove(nid: int):
+    row = db.rule_note_get(nid)
+    if not row:
+        return err("not found", 404)
+    db.rule_note_delete(nid)
+    auth.audit("rule_note.delete", "rule_note", nid,
+               {"rule_id": row["rule_id"], "agent_name": row["agent_name"]})
+    return ok({"deleted": nid})
 
 
 @api_bp.route("/alerts/<int:aid>/related")
@@ -841,6 +906,12 @@ def actions_update(aid: int):
         return err("invalid status")
     if status:
         db.update_action_status(aid, status, notes)
+    elif notes is not None:
+        # Notes-only update: keep the current status, just attach/replace notes
+        # (previously dropped silently when no status was supplied).
+        db.update_action_notes(aid, notes)
+    else:
+        return err("nothing to update")
     return ok({"id": aid})
 
 
@@ -1231,6 +1302,10 @@ def pipeline_status():
 
 @api_bp.route("/pipeline/run", methods=["POST"])
 def pipeline_run():
+    # Triggers collect/analyse/weekly shell scripts on claude-dev — an
+    # infrastructure action, so admin-only (the consumer-token path has its own
+    # mutation gate in home_pipeline_run).
+    if (resp := auth.require_admin()): return resp
     p = request.get_json(silent=True) or {}
     kind = p.get("kind")
     if kind not in ("collect", "analyse", "weekly"):
@@ -1792,6 +1867,14 @@ def me():
                "totp_enabled": bool(u.get("totp_enabled"))})
 
 
+@api_bp.route("/csrf")
+def csrf_token_get():
+    """Return the current session's CSRF token. Same-origin only (an off-origin
+    attacker can't read the JSON response), so it's safe to expose to the SPA —
+    the JS api() wrapper normally reads it from the page <meta> tag instead."""
+    return ok({"csrf_token": auth.csrf_get_token()})
+
+
 # ---------- 2FA (TOTP) ----------------------------------------------------
 
 @api_bp.route("/2fa/status")
@@ -2009,13 +2092,20 @@ def create_app() -> Flask:
         # auth middleware so it's available even on redirect/error responses.
         import secrets as _secrets
         g.csp_nonce = _secrets.token_urlsafe(16)
+        # Ensure a CSRF token exists in the session so templates can embed it in
+        # the <meta> tag the JS api() wrapper reads. Generated once per session.
+        auth.csrf_get_token()
 
     @app.before_request
     def _enforce_auth():
         # Make every session permanent so the 30-day lifetime applies
         from flask import session as _s
         _s.permanent = True
-        return auth.login_required_globally()
+        denied = auth.login_required_globally()
+        if denied is not None:
+            return denied
+        # CSRF check for authenticated, cookie-based mutating requests.
+        return auth.csrf_protect()
 
     # Security response headers on every response (defence-in-depth).
     # HSTS is intentionally omitted until the dashboard is served over HTTPS
@@ -2056,11 +2146,14 @@ def create_app() -> Flask:
                 "Strict-Transport-Security", "max-age=31536000; includeSubDomains")
         return resp
 
-    # Expose current user + CSP nonce to all templates.
+    # Expose current user + CSP nonce + CSRF token to all templates.
     @app.context_processor
     def _inject_user():
-        return {"current_user": auth.current_user(),
-                "csp_nonce": getattr(g, "csp_nonce", "")}
+        u = auth.current_user()
+        return {"current_user": u,
+                "is_admin": bool(u and (u.get("role") or "").lower() == "admin"),
+                "csp_nonce": getattr(g, "csp_nonce", ""),
+                "csrf_token": auth.csrf_get_token()}
 
     @app.errorhandler(BadParam)
     def _bad_param(e):

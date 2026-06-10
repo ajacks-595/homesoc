@@ -7,9 +7,18 @@
 const SOC = (() => {
   // ===== core utilities =====================================================
 
+  function csrfToken() {
+    const m = document.querySelector('meta[name="csrf-token"]');
+    return m ? m.content : "";
+  }
+
   async function api(path, opts = {}) {
     const r = await fetch(path, {
-      headers: { "Content-Type": "application/json", ...(opts.headers || {}) },
+      headers: {
+        "Content-Type": "application/json",
+        "X-CSRF-Token": csrfToken(),
+        ...(opts.headers || {}),
+      },
       ...opts,
     });
     let body;
@@ -115,7 +124,7 @@ const SOC = (() => {
     // Persist on server (best-effort)
     fetch("/api/settings/theme", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken() },
       body: JSON.stringify({ theme: name }),
     }).catch(() => {});
   }
@@ -291,9 +300,9 @@ const SOC = (() => {
     }
     const renderItem = (a) =>
       `<div style="margin:6px 0; padding:6px 0; border-bottom:1px solid var(--border)">
-         <span class="badge ${a.priority.toLowerCase()}">${a.priority}</span>
-         <span style="margin-left:6px">${fmt.short(stripBold(a.description), 200)}</span>
-         <div class="tiny muted">${a.briefing_date} · ${a.status}</div>
+         <span class="badge ${escapeHtml((a.priority || "").toLowerCase())}">${escapeHtml(a.priority)}</span>
+         <span style="margin-left:6px">${escapeHtml(fmt.short(stripBold(a.description), 200))}</span>
+         <div class="tiny muted">${escapeHtml(a.briefing_date)} · ${escapeHtml(a.status)}</div>
        </div>`;
     let html = "";
     p1.forEach(a => html += renderItem(a));   // all P1s
@@ -841,6 +850,65 @@ const SOC = (() => {
     host.innerHTML = html;
   }
 
+  // Expected-behaviour note for a (rule, agent): persistent analyst context
+  // shown inline next to matching alerts. Renders the saved note (if any) with
+  // an edit affordance, or an "add note" prompt.
+  async function loadRuleNote(a, host) {
+    if (!host) return;
+    const q = `/api/rule-notes/lookup?rule_id=${encodeURIComponent(a.rule_id)}`
+            + (a.agent_name ? `&agent=${encodeURIComponent(a.agent_name)}` : "");
+    const r = await api(q);
+    const note = r && r.success ? r.data : null;
+    renderRuleNote(a, host, note, false);
+  }
+
+  function renderRuleNote(a, host, note, editing) {
+    if (editing) {
+      const scope = a.agent_name
+        ? `<label class="tiny"><input type="checkbox" class="rn-allagents"> apply to all agents (not just ${escapeHtml(a.agent_name)})</label>`
+        : "";
+      host.innerHTML = `
+        <textarea class="rn-text" style="width:100%; min-height:54px" placeholder="e.g. expected — nightly backup job triggers this on this host">${escapeHtml(note ? note.note : "")}</textarea>
+        <div class="flex-row" style="gap:6px; margin-top:4px; align-items:center">
+          <button class="small rn-save">Save note</button>
+          ${note ? `<button class="ghost small danger rn-del">Delete</button>` : ""}
+          <button class="ghost small rn-cancel">Cancel</button>
+          ${scope}
+        </div>`;
+      host.querySelector(".rn-save").addEventListener("click", async () => {
+        const text = host.querySelector(".rn-text").value.trim();
+        if (!text) { toast("Note is empty.", "danger"); return; }
+        const allAgents = host.querySelector(".rn-allagents");
+        const agent = (allAgents && allAgents.checked) ? "" : (a.agent_name || "");
+        const res = await api("/api/rule-notes", {
+          method: "POST",
+          body: JSON.stringify({ rule_id: a.rule_id, agent_name: agent, note: text }),
+        });
+        if (res.success) { toast("Note saved.", "info"); loadRuleNote(a, host); }
+        else toast(res.error || "save failed", "danger");
+      });
+      const del = host.querySelector(".rn-del");
+      if (del) del.addEventListener("click", async () => {
+        const res = await api("/api/rule-notes/" + note.id, { method: "DELETE" });
+        if (res.success) { toast("Note deleted.", "info"); loadRuleNote(a, host); }
+      });
+      host.querySelector(".rn-cancel").addEventListener("click", () => renderRuleNote(a, host, note, false));
+      return;
+    }
+    if (note) {
+      const scope = note.agent_name ? `agent ${escapeHtml(note.agent_name)}` : "all agents";
+      host.innerHTML = `
+        <div class="card small" style="background:rgba(88,166,255,0.06)">
+          <div>${escapeHtml(note.note)}</div>
+          <div class="tiny muted" style="margin-top:4px">${scope}${note.created_by ? " · " + escapeHtml(note.created_by) : ""} · ${fmt.ts(note.updated_at)} <a href="#" class="rn-edit">edit</a></div>
+        </div>`;
+      host.querySelector(".rn-edit").addEventListener("click", e => { e.preventDefault(); renderRuleNote(a, host, note, true); });
+    } else {
+      host.innerHTML = `<a href="#" class="small rn-add">+ Add expected-behaviour note</a>`;
+      host.querySelector(".rn-add").addEventListener("click", e => { e.preventDefault(); renderRuleNote(a, host, null, true); });
+    }
+  }
+
   function toggleAlertRow(tr, a) {
     const next = tr.nextElementSibling;
     if (next && next.classList.contains("alert-expanded")) {
@@ -917,6 +985,10 @@ const SOC = (() => {
         <h3 style="margin:0 0 6px">Related activity <span class="muted tiny">(last 24h, by indicator)</span></h3>
         <div class="related-body muted small">Looking for related activity…</div>
       </div>
+      <div class="rule-note" data-rule-note="${a.id}" style="margin-top:12px">
+        <h3 style="margin:0 0 6px">Expected behaviour <span class="muted tiny">(rule ${escapeHtml(a.rule_id)}${a.agent_name ? " · " + escapeHtml(a.agent_name) : ""})</span></h3>
+        <div class="rule-note-body muted small">…</div>
+      </div>
       <div class="ai-explain" data-alert-id="${a.id}" style="margin-top:12px">
         <div class="flex-row" style="justify-content:space-between">
           <h3 style="margin:0">AI Explanation <span class="muted tiny">(web-enabled)</span></h3>
@@ -949,6 +1021,9 @@ const SOC = (() => {
 
     // Related activity (non-AI IOC correlation) — best-effort, loaded async
     loadRelated(a.id, td.querySelector(`[data-related="${a.id}"] .related-body`));
+
+    // Expected-behaviour note for this (rule, agent) — loaded async
+    loadRuleNote(a, td.querySelector(`[data-rule-note="${a.id}"] .rule-note-body`));
 
     // AI explain button — fetch (or generate) the explanation
     const aiBtn = td.querySelector(`[data-explain="${a.id}"]`);
@@ -2081,7 +2156,7 @@ const SOC = (() => {
         <td><span class="badge vuln-conf-${m.confidence}" title="${escapeHtml(m.match_reason || "")}">${m.confidence}</span></td>
         <td>${statusSel}</td>
         <td class="right tiny muted" title="${escapeHtml(m.created_at || "")}">${fmt.age(m.created_at)}</td>
-        <td>${m.bookstack_url ? `<a href="${escapeHtml(m.bookstack_url)}" target="_blank" rel="noopener" title="BookStack deep dive">📖</a>` : ""}</td>`;
+        <td>${safeUrl(m.bookstack_url) ? `<a href="${escapeHtml(safeUrl(m.bookstack_url))}" target="_blank" rel="noopener" title="BookStack deep dive">📖</a>` : ""}</td>`;
       tbody.appendChild(tr);
     });
     tbody.querySelectorAll(".vm-item").forEach(a_ =>
@@ -2103,7 +2178,7 @@ const SOC = (() => {
         ${vulnSevBadge(d.severity, d.cvss_score)} ·
         ${escapeHtml(d.status_label || "")} ·
         last seen in briefing ${escapeHtml(d.briefing_date || "?")}
-        ${d.bookstack_url ? ` · <a href="${escapeHtml(d.bookstack_url)}" target="_blank" rel="noopener">open in BookStack ↗</a>` : ""}
+        ${safeUrl(d.bookstack_url) ? ` · <a href="${escapeHtml(safeUrl(d.bookstack_url))}" target="_blank" rel="noopener">open in BookStack ↗</a>` : ""}
       </div>
       ${d.action ? `<div class="card small" style="margin-bottom:8px">⚡ ${escapeHtml(d.action)}</div>` : ""}
       ${d.parse_ok ? "" : `<div class="badge warn" style="margin-bottom:8px">partial parse — review the source page</div>`}
@@ -2309,12 +2384,17 @@ const SOC = (() => {
 
   async function initSettings() {
     initThemePicker();    // wires every .theme-swatch[data-theme="..."]
-    await Promise.all([
-      loadHostConfig(), loadHomeApi(),
-      loadKeys(), loadPipeline(), loadWazuhStatus(),
-      loadWebhooks(), loadAiUsage(), loadBackupConfig(), loadBackupHistory(),
-      loadUsers(), loadAuditLog(), load2fa(),
-    ]);
+    // Cards behind the admin-only endpoints are server-side hidden for analysts
+    // (#host-config-card only renders for admins); skip their loaders so we
+    // don't fire requests that would just 403.
+    const isAdmin = !!document.getElementById("host-config-card");
+    const tasks = [loadPipeline(), loadWazuhStatus(), loadWebhooks(),
+                   loadAiUsage(), load2fa()];
+    if (isAdmin) {
+      tasks.push(loadHostConfig(), loadHomeApi(), loadKeys(),
+                 loadBackupConfig(), loadBackupHistory(), loadUsers(), loadAuditLog());
+    }
+    await Promise.all(tasks);
   }
 
   // ----- Two-factor auth (own account) -----------------------------------
@@ -2815,7 +2895,7 @@ const SOC = (() => {
     }));
     host.querySelectorAll("[data-test]").forEach(b => b.addEventListener("click", async () => {
       const svc = b.dataset.test;
-      const r = await fetch("/api/settings/keys/" + svc + "/test", { method: "POST" }).then(r => r.json());
+      const r = await api("/api/settings/keys/" + svc + "/test", { method: "POST" });
       toast(svc + ": " + (r.success ? `OK (${r.status_code})` : "FAIL — " + (r.error || r.snippet)),
             r.success ? "info" : "danger");
     }));

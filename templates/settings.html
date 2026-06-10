@@ -5,6 +5,11 @@
 
 <h1>Settings</h1>
 
+{% if not is_admin %}
+<div class="banner" style="margin-bottom:12px">You're signed in as <strong>{{ current_user.username }}</strong> (analyst). Administrative settings (hosts, users, backups, API keys, audit log) are hidden — ask an admin if you need them.</div>
+{% endif %}
+
+{% if is_admin %}
 <div class="card" id="host-config-card">
   <h2>Hosts &amp; Connections</h2>
   <p class="muted small">SSH connection details for the external components this
@@ -35,6 +40,7 @@
       <span class="small">Allow mutating calls (e.g. trigger pipeline runs) — leave off for read-only</span></label>
   </div>
 </div>
+{% endif %}
 
 <div class="card">
   <div class="flex-row" style="justify-content:space-between">
@@ -57,6 +63,7 @@
   <div id="ai-usage"><div class="muted small">Loading…</div></div>
 </div>
 
+{% if is_admin %}
 <div class="card">
   <h2>Backup &amp; Restore</h2>
   <p class="muted small">Snapshots use SQLite's online-backup API — safe even mid-write.
@@ -91,8 +98,10 @@
     <tbody></tbody>
   </table>
 </div>
+{% endif %}
 
 <div class="card-row cols-2">
+  {% if is_admin %}
   <div class="card">
     <h2>API Keys</h2>
     <p class="muted small">Keys are encrypted at rest using a Fernet key derived from this machine's
@@ -100,11 +109,13 @@
 
     <div id="key-rows" class="flex-col"></div>
   </div>
+  {% endif %}
 
   <div class="card">
     <h2>Pipeline Status</h2>
     <div class="flex-col" id="pipeline-rows"></div>
 
+    {% if is_admin %}
     <div class="divider"></div>
     <div class="flex-row">
       <button class="secondary" data-act="pipelineRun" data-arg="collect">▶ Run Collection Now</button>
@@ -112,6 +123,7 @@
       <button class="ghost" data-act="pipelineRun" data-arg="weekly">▶ Run Weekly Now</button>
     </div>
     <div class="muted small" id="pipeline-output" style="margin-top:8px"></div>
+    {% endif %}
   </div>
 </div>
 
@@ -121,6 +133,7 @@
     <div id="wazuh-conn"><div class="muted small">Checking…</div></div>
   </div>
 
+  {% if is_admin %}
   <div class="card">
     <h2>Users</h2>
     <table class="data" id="users-table">
@@ -131,6 +144,7 @@
       <button data-act="userOpenAdd">+ Add User</button>
     </div>
   </div>
+  {% endif %}
 
   <div class="card">
     <h2>Two-Factor Authentication <span class="muted small">(your account)</span></h2>
@@ -140,6 +154,7 @@
   </div>
 </div>
 
+{% if is_admin %}
 <div class="card">
   <h2>Audit Log <span class="muted small">(recent 200)</span></h2>
   <table class="data" id="audit-table" style="font-size:12px">
@@ -147,6 +162,7 @@
     <tbody></tbody>
   </table>
 </div>
+{% endif %}
 
 <div class="card-row cols-2">
   <div class="card">

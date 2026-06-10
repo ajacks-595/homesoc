@@ -116,6 +116,11 @@ DEFAULT_THEME = os.environ.get("SOC_DEFAULT_THEME", "midnight")
 THEMES = ("midnight", "terminal", "nordic", "light")
 
 OSINT_CACHE_DAYS = int(os.environ.get("SOC_OSINT_CACHE_DAYS", "7"))
+# Time window for "where has this IOC appeared?" lookups. These match against
+# alerts.raw_json with a leading-% LIKE, which is unindexable and otherwise
+# scans the whole alerts table (387k rows / ~850MB on the reference deploy).
+# Bounding by timestamp lets SQLite walk only recent rows via idx_alerts_ts.
+OSINT_REF_DAYS = int(os.environ.get("SOC_OSINT_REF_DAYS", "365"))
 SSH_TIMEOUT = int(os.environ.get("SOC_SSH_TIMEOUT", "30"))
 
 

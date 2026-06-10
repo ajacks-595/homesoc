@@ -124,9 +124,27 @@ def login_throttle_check(ip: str | None, username: str) -> float:
         return max(0.0, retry)
 
 
+# Once the failure map grows past this many distinct keys, sweep out every
+# fully-expired bucket. Without this, a spray of distinct usernames/IPs (each
+# failing once and never retrying) leaves a key behind forever — a slow
+# unbounded-memory DoS, since per-key pruning only happens when that exact key
+# is touched again.
+_LOGIN_FAILS_SWEEP_AT = int(os.environ.get("SOC_LOGIN_FAILS_SWEEP_AT", "4096"))
+
+
+def _login_sweep(now: float) -> None:
+    """Drop buckets whose every timestamp has aged out of the window. Caller
+    holds _login_lock."""
+    for key in list(_login_fails.keys()):
+        if all(now - t >= _LOGIN_WINDOW_S for t in _login_fails[key]):
+            _login_fails.pop(key, None)
+
+
 def login_record_failure(ip: str | None, username: str) -> None:
     now = time.monotonic()
     with _login_lock:
+        if len(_login_fails) >= _LOGIN_FAILS_SWEEP_AT:
+            _login_sweep(now)
         for key in _login_keys(ip, username):
             _login_fails.setdefault(key, []).append(now)
 
@@ -241,6 +259,69 @@ def require_admin():
         return None
     return jsonify({"success": False, "data": None,
                     "error": "admin role required"}), 403
+
+
+# ---------- CSRF protection (synchronizer-token pattern) ------------------
+# Cookie-authenticated requests are vulnerable to CSRF: a malicious page can
+# make the browser send a state-changing request with the victim's session
+# cookie attached. SameSite=Lax blocks the cross-site *navigation* case but not
+# every vector (e.g. same-site subdomains, some method/redirect tricks). We add
+# a per-session token that must be echoed in an `X-CSRF-Token` header (read from
+# a page meta tag by the JS `api()` wrapper, which an off-origin attacker cannot
+# read). Bearer-token consumers (/api/home/*) are exempt — they don't rely on
+# the session cookie, so they aren't CSRF-exposed. The login/setup forms are
+# exempt (they establish the session; login-CSRF is low-impact and standard to
+# allow). Disabled under TESTING unless CSRF_FORCE is set, so the existing test
+# suite keeps issuing cookie-only API calls while a dedicated test exercises the
+# real enforcement path.
+
+_CSRF_SESSION_KEY = "csrf_token"
+_CSRF_HEADER = "X-CSRF-Token"
+_CSRF_SAFE_METHODS = {"GET", "HEAD", "OPTIONS", "TRACE"}
+_CSRF_EXEMPT_ENDPOINTS = {
+    "auth.login_submit", "auth.setup_submit", "auth.login_2fa",
+}
+
+
+def csrf_get_token() -> str:
+    """Return the session's CSRF token, minting + storing one if absent."""
+    tok = session.get(_CSRF_SESSION_KEY)
+    if not tok:
+        tok = secrets.token_urlsafe(32)
+        session[_CSRF_SESSION_KEY] = tok
+    return tok
+
+
+def _csrf_enabled() -> bool:
+    from flask import current_app
+    if current_app.config.get("CSRF_FORCE"):
+        return True
+    return not current_app.config.get("TESTING")
+
+
+def csrf_protect():
+    """before_request guard: reject a cookie-authenticated mutating request that
+    doesn't carry a matching CSRF token. Returns None to allow, or a 403 JSON
+    response. Runs AFTER login_required_globally, so only authenticated requests
+    reach here."""
+    if not _csrf_enabled():
+        return None
+    if request.method in _CSRF_SAFE_METHODS:
+        return None
+    # Bearer-token consumer API is not cookie-based → not CSRF-exposed.
+    if request.path.startswith("/api/home/"):
+        return None
+    if request.endpoint in _CSRF_EXEMPT_ENDPOINTS:
+        return None
+    expected = session.get(_CSRF_SESSION_KEY)
+    sent = request.headers.get(_CSRF_HEADER)
+    if not sent and request.form:
+        sent = request.form.get("csrf_token")
+    if not expected or not sent or not hmac.compare_digest(sent, expected):
+        from flask import jsonify
+        return jsonify({"success": False, "data": None,
+                        "error": "CSRF token missing or invalid"}), 403
+    return None
 
 
 def current_user() -> dict | None:
