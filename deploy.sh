@@ -26,14 +26,15 @@ SSH="ssh -i $SSH_KEY -o StrictHostKeyChecking=accept-new $WAZUH_USER@$WAZUH_HOST
 SSH_T="ssh -t -i $SSH_KEY -o StrictHostKeyChecking=accept-new $WAZUH_USER@$WAZUH_HOST"
 RSYNC_E="ssh -i $SSH_KEY -o StrictHostKeyChecking=accept-new"
 
+# Helpers are defined BEFORE first use (the root-guard below calls err()).
+say() { printf "\n\033[1;36m>>> %s\033[0m\n" "$*"; }
+warn() { printf "\033[1;33m!! %s\033[0m\n" "$*"; }
+err() { printf "\033[1;31mXX %s\033[0m\n" "$*" >&2; }
+
 if [ "$(id -u)" = "0" ]; then
   err "Do not run this with sudo locally — it should run as your normal user (dev) so it uses /home/dev/.ssh/collector_key and prompts on wazuh-vm only."
   exit 1
 fi
-
-say() { printf "\n\033[1;36m>>> %s\033[0m\n" "$*"; }
-warn() { printf "\033[1;33m!! %s\033[0m\n" "$*"; }
-err() { printf "\033[1;31mXX %s\033[0m\n" "$*" >&2; }
 
 say "Sanity check: SSH to $WAZUH_USER@$WAZUH_HOST"
 $SSH 'echo SSH_OK; whoami; hostname' || { err "SSH failed — check $SSH_KEY"; exit 1; }
@@ -70,19 +71,24 @@ rsync -az -e "$RSYNC_E" \
   /opt/siem/context.md "$WAZUH_USER@$WAZUH_HOST:$REMOTE_DIR/data/siem/context.md" || true
 
 say "Create / refresh virtualenv and install dependencies"
-$SSH "cd $REMOTE_DIR && python3 -m venv venv && ./venv/bin/pip install --quiet --upgrade pip && ./venv/bin/pip install --quiet -r requirements.txt"
+# Prefer the pinned lock (the exact tested prod closure — see CLAUDE.md gotcha
+# 2026-06-04); fall back to requirements.txt only if the lock is absent.
+$SSH "cd $REMOTE_DIR && python3 -m venv venv && ./venv/bin/pip install --quiet --upgrade pip && \
+      if [ -f requirements.lock ]; then ./venv/bin/pip install --quiet -r requirements.lock; \
+      else ./venv/bin/pip install --quiet -r requirements.txt; fi"
 
-say "Install systemd units + timers (sudo on wazuh-vm)"
-$SSH_T "sudo cp $REMOTE_DIR/soc-dashboard.service /etc/systemd/system/ && \
-        sudo cp $REMOTE_DIR/systemd/soc-dashboard-sync@.service /etc/systemd/system/ && \
-        sudo cp $REMOTE_DIR/systemd/soc-dashboard-sync-alerts.timer /etc/systemd/system/ && \
-        sudo cp $REMOTE_DIR/systemd/soc-dashboard-sync-dns.timer /etc/systemd/system/ && \
-        sudo cp $REMOTE_DIR/systemd/soc-dashboard-sync-agents.timer /etc/systemd/system/ && \
-        sudo systemctl daemon-reload && \
-        sudo systemctl enable --now soc-dashboard.service \
-                                    soc-dashboard-sync-alerts.timer \
-                                    soc-dashboard-sync-dns.timer \
-                                    soc-dashboard-sync-agents.timer"
+say "Install systemd units + ALL sync timers (sudo on wazuh-vm)"
+# Loop over every timer in systemd/ so newly-added ones (briefings, retention,
+# cve, …) are installed automatically — a hard-coded list silently drifts and
+# left briefings/cve/retention un-scheduled on fresh deploys (the service unit
+# sets SOC_POLLERS=systemd, so the in-process pollers don't cover the gap).
+$SSH_T "set -e; \
+        sudo cp $REMOTE_DIR/soc-dashboard.service /etc/systemd/system/; \
+        sudo cp $REMOTE_DIR/systemd/soc-dashboard-sync@.service /etc/systemd/system/; \
+        for t in $REMOTE_DIR/systemd/*.timer; do sudo cp \"\$t\" /etc/systemd/system/; done; \
+        sudo systemctl daemon-reload; \
+        sudo systemctl enable --now soc-dashboard.service; \
+        for t in $REMOTE_DIR/systemd/*.timer; do sudo systemctl enable --now \"\$(basename \"\$t\")\"; done"
 
 say "Sudoers — skipping (you already installed it manually)."
 

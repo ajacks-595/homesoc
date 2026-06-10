@@ -1,0 +1,18 @@
+# /etc/sudoers.d/soc-dashboard-runtipi — install on the AdGuard Home host
+# (the original deployment's runtipi box, 10.0.0.188).
+#
+# The dashboard SSHes in (as the AdGuard host user, e.g. `runtipi`) and runs
+# `sudo -n /usr/bin/cat <querylog>` to read AdGuard's query log. Without this
+# file the read only works if that user already has blanket NOPASSWD:ALL — which
+# makes the dashboard's SSH key effectively ROOT on the AdGuard host, far beyond
+# reading one file. This rule pins the capability to exactly that one read.
+#
+# Adjust the username and querylog path to match your deployment (they must
+# match Settings → Hosts: adguard_user and adguard_querylog_path). The path is
+# exact-matched by sudo, so it must be byte-for-byte what sync.py passes.
+#
+# Install with:
+#   sudo visudo -cf this-file       # validate first
+#   sudo install -m 0440 this-file /etc/sudoers.d/soc-dashboard-runtipi
+
+runtipi ALL=(root) NOPASSWD: /usr/bin/cat /home/runtipi/runtipi/app-data/migrated/adguard/data/work/data/querylog.json

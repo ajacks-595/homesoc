@@ -28,13 +28,19 @@ HEALTH_URL="http://10.0.0.213:8080/login"     # expect HTTP 200 once up
 SRC_DIR="${SOC_SRC_DIR:-$HOME/projects/soc-dashboard}"
 SSH=(ssh -i "$KEY" -o ConnectTimeout=5 "$HOST")
 
-# Files to ship. Explicit list (NOT a blanket `rsync --delete` of the tree) so
-# we never clobber server-side venv/, .ssh/, or data dirs under /opt/dashboard.
-# Override by passing file paths as args: ./deploy-soc-dashboard.sh app.py sync.py
+# Files to ship. Explicit allowlist (NOT a blanket `rsync --delete` of the tree)
+# so we never clobber server-side venv/, .ssh/, or data dirs under
+# /opt/dashboard. Whole DIRECTORIES (templates/, static/) are listed rather than
+# individual files: a hand-picked per-file template list silently drifts —
+# app.py's CSP nonce shipped while 8 templates stayed on their pre-hardening
+# versions and CSP-blocked every page (CLAUDE.md gotcha 15, 2026-06-07). rsync
+# -R recurses directories, so this ships every template/asset every time.
+# Override with an explicit file list: ./deploy-soc-dashboard.sh app.py sync.py
 DEFAULT_MANIFEST=(
   config.py database.py app.py sync.py ai.py wazuh.py auth.py backup.py
-  static/js/main.js
-  templates/alerts.html templates/settings.html
+  notifications.py osint.py parsers.py vulntrack.py mcp_server.py
+  templates static/js static/css
+  requirements.txt requirements.lock requirements-mcp.txt
   soc-dashboard.service
 )
 # --------------------------------------------------------------------------
@@ -69,6 +75,9 @@ for i in $(seq 1 15); do
 done
 
 echo " FAILED (last code: ${code:-none})" >&2
-echo "==> Last 30 journal lines:" >&2
-"${SSH[@]}" "sudo -n /usr/bin/journalctl -u ${SERVICE} -n 30 --no-pager" >&2 || true
+# The log file is chowned to wazuh by deploy.sh, so no sudo is needed (and there
+# is no sudoers rule for journalctl — the previous `sudo -n journalctl` always
+# died with "a password is required", masked by `|| true`).
+echo "==> Last 30 log lines:" >&2
+"${SSH[@]}" "tail -n 30 /var/log/soc-dashboard.log" >&2 || true
 exit 1
