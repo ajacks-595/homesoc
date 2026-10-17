@@ -1,0 +1,94 @@
+# tests-immutable guard, revision 2 (JAC-6 rollout): revision 1 plus Xcode test targets
+# (*Tests/) as test paths, and Cargo.toml and project.yml as test configuration.
+name: tests-immutable
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    name: Maintenance branch may not touch tests
+    runs-on: ubuntu-latest
+    if: startsWith(github.head_ref, 'paperclip/maintenance/')
+    steps:
+      - name: Check out full history
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - name: Fail if the diff touches tests or .github/
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          merge_base="$(git merge-base "$BASE_SHA" "$HEAD_SHA")"
+          echo "merge-base: $merge_base"
+
+          changed="$(git diff --name-only --no-renames --diff-filter=ACMRD "$merge_base" "$HEAD_SHA")"
+          if [ -z "$changed" ]; then
+            echo "No files changed."
+            exit 0
+          fi
+          echo "Changed files:"
+          sed 's/^/  /' <<<"$changed"
+
+          # Test-path patterns across the ecosystems in use:
+          # Rust (tests/, benches/), JS/TS (*.test.*, *.spec.*, __tests__/, e2e/),
+          # Python (test_*.py, *_test.py, tests/, conftest.py), Xcode test targets
+          # (SonarTests/, PaperMindTests/), plus generic fixtures.
+          violations="$(grep -E \
+            -e '(^|/)tests?/' \
+            -e '(^|/)__tests__/' \
+            -e '(^|/)benches/' \
+            -e '(^|/)e2e/' \
+            -e '(^|/)spec/' \
+            -e '(^|/)conftest\.py$' \
+            -e '(^|/)test_[^/]+\.py$' \
+            -e '[^/]+_test\.(py|go|rs)$' \
+            -e '[^/]+\.(test|spec)\.(js|jsx|ts|tsx|mjs|cjs)$' \
+            -e '(^|/)testdata/' \
+            -e '(^|/)fixtures/' \
+            -e '(^|/)[A-Za-z0-9_.-]*Tests/' \
+            <<<"$changed" || true)"
+
+          github_changes="$(grep -E '^\.github/' <<<"$changed" || true)"
+
+          # Test configuration: allowed (dependency bumps touch it), but flagged.
+          test_config="$(grep -E \
+            -e '(^|/)package\.json$' \
+            -e '(^|/)pytest\.ini$' \
+            -e '(^|/)pyproject\.toml$' \
+            -e '(^|/)tox\.ini$' \
+            -e '(^|/)setup\.cfg$' \
+            -e '(^|/)(jest|vitest)\.config\.[^/]+$' \
+            -e '(^|/)Makefile$' \
+            -e '(^|/)Cargo\.toml$' \
+            -e '(^|/)project\.yml$' \
+            <<<"$changed" || true)"
+          while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            echo "::warning file=$f::Test-configuration file changed. Check that no test was disabled, skipped or loosened."
+          done <<<"$test_config"
+
+          fail=0
+          if [ -n "$violations" ]; then
+            echo "::error::A maintenance branch may not modify test files."
+            sed 's/^/  test file: /' <<<"$violations"
+            fail=1
+          fi
+          if [ -n "$github_changes" ]; then
+            echo "::error::A maintenance branch may not modify anything under .github/."
+            sed 's/^/  .github: /' <<<"$github_changes"
+            fail=1
+          fi
+
+          [ "$fail" -eq 0 ] || exit 1
+          echo "Clean: no test files or .github/ files touched."
