@@ -2,4 +2,4 @@
 # Install only if you want the MCP server (mcp_server.py):
 #   ./venv/bin/pip install -r requirements-mcp.txt
 # The dashboard itself does not need this.
-mcp>=1.23,<2
+mcp>=2.3.0,<3
