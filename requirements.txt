@@ -9,4 +9,4 @@ cryptography>=42.0
 pyotp>=2.9            # optional per-user TOTP 2FA
 requests>=2.31
 defusedxml>=0.7       # safe XML parsing for Wazuh local_rules.xml
-waitress>=3.0        # production WSGI server (single process + thread pool)
+waitress>=3.0.2        # production WSGI server (single process + thread pool)
