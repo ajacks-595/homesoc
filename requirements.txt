@@ -2,7 +2,7 @@
 # ceiling silently DOWNGRADES a host that already has a newer (working) version
 # on the next `pip install -r` — for reproducible deploys, generate a lockfile
 # (`pip freeze > requirements.lock`) on the target instead.
-Flask>=3.0
+Flask>=3.1.3
 markdown>=3.5
 nh3>=0.3.7           # HTML sanitization of rendered markdown (XSS defense)
 cryptography>=42.0
