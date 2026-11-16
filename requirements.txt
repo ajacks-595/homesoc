@@ -5,7 +5,7 @@
 Flask>=3.0
 markdown>=3.5
 nh3>=0.3.7           # HTML sanitization of rendered markdown (XSS defense)
-cryptography>=42.0
+cryptography>=50.0.2
 pyotp>=2.10.0            # optional per-user TOTP 2FA
 requests>=2.34.2
 defusedxml>=0.7.1       # safe XML parsing for Wazuh local_rules.xml
